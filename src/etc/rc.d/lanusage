@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# PROVIDE: lanusage
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+#
+# LAN usage collector (OPNsense plugin os-lanusage)
+
+. /etc/rc.subr
+
+name="lanusage"
+rcvar="lanusage_enable"
+
+load_rc_config "${name}"
+
+: ${lanusage_enable:="NO"}
+
+pidfile="/var/run/${name}.pid"
+script="/usr/local/opnsense/scripts/OPNsense/LanUsage/collector.py"
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+extra_commands="status"
+
+lanusage_running()
+{
+	[ -f "${pidfile}" ] && kill -0 "$(cat "${pidfile}")" 2>/dev/null
+}
+
+lanusage_start()
+{
+	if lanusage_running; then
+		echo "${name} is already running."
+		return 0
+	fi
+	mkdir -p /var/db/lanusage
+	echo "Starting ${name}."
+	# daemon(8) supervises and restarts the collector if it ever dies
+	/usr/sbin/daemon -f -r -R 10 -P "${pidfile}" -t "${name}" /usr/local/bin/python3 "${script}"
+}
+
+lanusage_stop()
+{
+	if ! lanusage_running; then
+		echo "${name} is not running."
+		rm -f "${pidfile}"
+		return 0
+	fi
+	echo "Stopping ${name}."
+	pid="$(cat "${pidfile}")"
+	kill -TERM "${pid}"
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		kill -0 "${pid}" 2>/dev/null || break
+		sleep 1
+	done
+	kill -0 "${pid}" 2>/dev/null && kill -KILL "${pid}"
+	rm -f "${pidfile}"
+}
+
+lanusage_status()
+{
+	if lanusage_running; then
+		echo "${name} is running as pid $(cat "${pidfile}")."
+	else
+		echo "${name} is not running."
+		return 1
+	fi
+}
+
+run_rc_command "$1"
