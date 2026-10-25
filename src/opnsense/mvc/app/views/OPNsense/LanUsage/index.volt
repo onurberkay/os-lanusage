@@ -261,7 +261,8 @@ $(function () {
         in_table: 'LAN host in block table',
         blocked_out: 'Blocked outbound (host)',
         blocked_in: 'Blocked attack (host)',
-        rule_blocking: 'Block rule busy'
+        rule_blocking: 'Block rule busy',
+        src_limit: 'Source at rule limit'
     };
     function pctBar(pct) {
         const p = Math.min(100, Math.max(0, Number(pct) || 0));
@@ -439,6 +440,24 @@ $(function () {
             {key: 'new_rate', label: 'New conn/s', cls: 'num', num: true, html: function (r) { return fmtNum(r.new_rate); }},
             {key: 'detail', label: 'Where the states go (top ports, inbound share)'}
         ], 'states', function (r) { return r.pct >= 100 ? 'lu-row-bad' : (r.pct >= 80 ? 'lu-row-warn' : ''); }),
+
+        srcLimits: makeTable('lu-src-limits', [
+            {key: 'ip', label: 'Source', sortValue: function (r) { return ipKey(r.ip); },
+             html: function (r) { return r.lan ? ipLink(r.ip) + ' <span class="lu-badge">LAN</span>' : esc(r.ip); }},
+            {key: 'kind', label: 'Limit'},
+            {key: 'pct', label: 'Now', num: true, cls: 'nowrap',
+             sortValue: function (r) { return r.pct === null ? -1 : r.pct; },
+             html: function (r) {
+                 return r.now ? pctBar(r.pct) + ' <span class="text-muted">' + esc(r.value) + ' / ' + esc(r.limit) + '</span>'
+                     : '<span class="text-muted">below 90% now</span>';
+             }},
+            {key: 'peak', label: 'Peak', cls: 'num', num: true},
+            {key: 'hits', label: 'Polls at limit', cls: 'num', num: true},
+            {key: 'rule', label: 'Rule', num: true, text: function (r) { return '@' + r.rule + ' ' + r.descr; },
+             html: function (r) { return '@' + esc(r.rule) + ' <b>' + esc(r.descr) + '</b>'; }},
+            {key: 'last_seen', label: 'Last at limit', num: true, cls: 'nowrap',
+             html: function (r) { return r.last_seen ? ago(r.last_seen) : '<span class="text-muted">-</span>'; }}
+        ], 'pct', function (r) { return r.at_limit ? 'lu-row-bad' : (r.now ? 'lu-row-warn' : ''); }),
 
         counters: makeTable('lu-counters', [
             {key: 'name', label: 'pf counter', html: function (r) { return '<b>' + esc(r.name) + '</b>'; }},
@@ -705,6 +724,7 @@ $(function () {
             return {t: p.t, values: [p.limit_hits]};
         }), {series: [{label: 'limit counter increases', color: '#d9534f'}], format: fmtNum, timeFormat: fmtTime, height: 200});
         tables.limitHosts.setRows(d.hosts);
+        tables.srcLimits.setRows(d.src_limits || []);
         tables.counters.setRows(d.counters);
         tables.rules.setRows(d.rules);
         tables.tablehits.setRows(d.tablehits);
@@ -1053,6 +1073,17 @@ $(function () {
         </div>
         <div class="lu-pane" id="lu-limit-hosts">
             <h4 style="font-size:13px;font-weight:600">{{ lang._('LAN hosts by firewall states (now)') }}</h4>
+            <div class="lu-table-tools">
+                <input type="text" class="form-control lu-search" placeholder="{{ lang._('Search...') }}"/>
+                <span class="lu-count"></span>
+            </div>
+            <div class="lu-table-wrap" style="max-height:360px">
+                <table class="table table-condensed table-hover lu-table"><thead><tr></tr></thead><tbody></tbody></table>
+            </div>
+        </div>
+        <div class="lu-pane" id="lu-src-limits">
+            <h4 style="font-size:13px;font-weight:600">{{ lang._('Sources at a per source rule limit (max-src-states, max-src-conn, max-src-conn-rate)') }}</h4>
+            <div class="lu-note">{{ lang._('From the pf source tracking table: which address reached which limit on which rule. New connections of a source at its limit are dropped.') }}</div>
             <div class="lu-table-tools">
                 <input type="text" class="form-control lu-search" placeholder="{{ lang._('Search...') }}"/>
                 <span class="lu-count"></span>

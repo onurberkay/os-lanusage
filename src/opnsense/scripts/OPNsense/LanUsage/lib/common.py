@@ -128,6 +128,11 @@ CREATE TABLE IF NOT EXISTS ts_rules (
     ts INTEGER, nr INTEGER, label TEXT, descr TEXT, packets INTEGER,
     PRIMARY KEY (ts, label, nr)
 );
+CREATE TABLE IF NOT EXISTS srclimits (
+    ip TEXT, nr INTEGER, kind TEXT, descr TEXT, limit_value INTEGER, peak INTEGER,
+    first_seen INTEGER, last_seen INTEGER, hits INTEGER DEFAULT 0,
+    PRIMARY KEY (ip, nr, kind)
+);
 CREATE TABLE IF NOT EXISTS tablehits (
     tbl TEXT, ip TEXT, first_seen INTEGER, last_seen INTEGER,
     PRIMARY KEY (tbl, ip)

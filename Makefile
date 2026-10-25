@@ -1,5 +1,5 @@
 PLUGIN_NAME=		lanusage
-PLUGIN_VERSION=		1.3
+PLUGIN_VERSION=		1.4
 PLUGIN_COMMENT=		LAN host port/service usage reporting with service detection
 PLUGIN_MAINTAINER=	onurberkay@sakla.app
 

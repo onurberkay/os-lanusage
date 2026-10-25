@@ -7,6 +7,13 @@ RDP, DNS, NTP, optionally nmap -sV).
 Plugin Changelog
 ================
 
+1.4
+
+* Per source limits (max-src-states, max-src-conn, max-src-conn-rate) are read
+  from the pf source tracking table: alerts name the source address and the
+  rule at the limit instead of guessing from the busiest hosts
+* "Sources at a per source rule limit" table on the States / Limits tab
+
 1.3
 
 * Blocked traffic without firewall logging: bounded sampling of connection

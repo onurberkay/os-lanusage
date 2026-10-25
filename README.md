@@ -57,6 +57,7 @@ Routed + NAT kurulumunda WAN'da örneklenen NAT'lı adresler LAN ağına girmedi
 | Too many states (host) | high, 2 katında critical | Bir LAN host'u ≥ *States per LAN host* (varsayılan 10 000) state tuttuğunda. Ağırlıklı inbound ise "DDoS hedefi olabilir", outbound ise "flood / ele geçirilmiş olabilir" diye yazar. |
 | Connection rate (host) | high | Bir LAN host'u saniyede ≥ 300 yeni bağlantı açtığında / aldığında |
 | LAN host in block table | virusprot/sshlockout: high, CrowdSec: critical | Bir LAN IP'si izlenen bir pf tablosuna eklendiğinde |
+| Source at rule limit | LAN kaynağı: high, dış kaynak: medium | Bir kaynak IP, kuralındaki `max-src-states`, `max-src-conn` ya da `max-src-conn-rate` sınırına ulaştığında. `pfctl -sS -v` (source tracking) okunur; uyarıda IP, limit (değer/sınır) ve kural (numara + açıklama) yazar. `src-limit` / `max-src-*` sayaç uyarıları da artık tahmin yerine o an limitte olan kaynakları yazar. %90'ı geçen kaynaklar States / Limits sekmesinde listelenir. |
 
 ### Transparent bridge modu
 

@@ -111,6 +111,7 @@ class Collector:
         self.rule_packets = {}
         self.rules_last = None
         self.rule_activity = []
+        self.src_limited = []
 
     def capture_devices(self):
         names = [x.strip() for x in self.cfg['sample_interfaces'].split(',') if x.strip()]
@@ -500,6 +501,10 @@ class Collector:
             (bucket, max(info['states'], row[0] if row else 0), states_limit,
              max(info['src_nodes'], row[1] if row else 0), src_limit, json.dumps(merged)))
 
+        rules = pfstats.read_rules()
+        self.rule_counters(now, rules)
+        self.check_src_nodes(now, rules)
+
         if states_limit:
             pct = info['states'] * 100.0 / states_limit
             if pct >= self.cfg['state_warn_pct']:
@@ -509,18 +514,87 @@ class Collector:
         for name, delta in deltas.items():
             if name in pfstats.WATCHED_COUNTERS:
                 severity, meaning = pfstats.WATCHED_COUNTERS[name]
+                culprit = self.src_limit_text(name) if name in pfstats.SRC_COUNTERS else ''
                 self.alert(now, 'pf_limit', severity, 'pf_limit:%s:%d' % (name, hour), count=delta, reopen=False,
-                           peer=name, detail='%s +%d: %s. Top LAN hosts: %s'
-                                             % (name, delta, meaning, self.top_hosts_text(rates)))
+                           peer=name, detail='%s +%d: %s. %s'
+                                             % (name, delta, meaning, culprit or 'Top LAN hosts: '
+                                                + self.top_hosts_text(rates)))
 
-        rules = pfstats.read_rules()
-        self.rule_counters(now, rules)
         if now - self.rules_read >= 60:
             self.rules_read = now
             self.check_rules(now, rules)
         if now - self.tables_read >= 60:
             self.tables_read = now
             self.check_tables(now)
+
+    def check_src_nodes(self, now, rules):
+        """
+        Per source limits (max-src-states, max-src-conn, max-src-conn-rate) from the source tracking
+        table: name the source address and the rule that is at (>= 90%) its limit.
+        """
+        limited = {r['nr']: r for r in rules if any(k.startswith('max-src-') and k != 'max-src-nodes'
+                                                    for k in r['options'])}
+        if not limited:
+            self.src_limited = []
+            return
+        descriptions = pfstats.rule_descriptions()
+        hour = now - now % 3600
+        found = []
+        for node in pfstats.read_src_nodes():
+            rule = limited.get(node['rule'])
+            if rule is None:
+                continue
+            options = rule['options']
+            checks = []
+            if 'max-src-states' in options:
+                checks.append(('max-src-states', node['states'], int(options['max-src-states'])))
+            if 'max-src-conn' in options:
+                checks.append(('max-src-conn', node['connections'], int(options['max-src-conn'])))
+            if 'max-src-conn-rate' in options:
+                count, seconds = options['max-src-conn-rate'].split('/')
+                checks.append(('max-src-conn-rate', node['rate'], int(count)))
+            for kind, value, limit in checks:
+                if limit and value >= limit * 0.9:
+                    found.append({
+                        'ip': node['ip'], 'lan': node['ip'] in self.lan, 'rule': rule['nr'],
+                        'descr': descriptions.get(rule['label'], '') or rule['text'][:80], 'kind': kind,
+                        'value': value, 'limit': limit, 'pct': round(value * 100.0 / limit, 1),
+                        'at_limit': value >= limit, 'states': node['states'], 'connections': node['connections'],
+                        'rate': '%s/%ss' % (node['rate'], node['rate_seconds']),
+                    })
+        found.sort(key=lambda f: (-f['pct'], f['ip']))
+        self.src_limited = found[:200]
+        at_limit = [f for f in found if f['at_limit']]
+        self.con.executemany(
+            """INSERT INTO srclimits (ip, nr, kind, descr, limit_value, peak, first_seen, last_seen, hits)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+               ON CONFLICT (ip, nr, kind) DO UPDATE SET descr = excluded.descr, limit_value = excluded.limit_value,
+                   peak = MAX(peak, excluded.peak), last_seen = excluded.last_seen, hits = hits + 1""",
+            [(f['ip'], f['rule'], f['kind'], f['descr'], f['limit'], int(f['value']), now, now) for f in at_limit])
+        for f in at_limit:
+            who = 'LAN host %s' % f['ip'] if f['lan'] else 'External source %s' % f['ip']
+            hint = '' if f['lan'] else ' (the limit protects your hosts from it)'
+            self.alert(now, 'src_limit', 'high' if f['lan'] else 'medium',
+                       'src_limit:%s:%d:%s:%d' % (f['ip'], f['rule'], f['kind'], hour), ip=f['ip'], reopen=False,
+                       peer=str(f['rule']),
+                       detail='%s is at %s %s/%d on rule @%d (%s), new connections are dropped%s'
+                              % (who, f['kind'], self._num(f['value']), f['limit'], f['rule'], f['descr'], hint))
+
+    @staticmethod
+    def _num(value):
+        return ('%d' % value) if float(value).is_integer() else ('%.1f' % value)
+
+    def src_limit_text(self, counter):
+        """ exact culprit for a per source limit counter, empty when nobody is at a limit right now """
+        kinds = {'max-src-states': ('max-src-states',), 'max-src-conn': ('max-src-conn',),
+                 'max-src-conn-rate': ('max-src-conn-rate',)}.get(counter)
+        hits = [f for f in self.src_limited if f['at_limit'] and (kinds is None or f['kind'] in kinds)]
+        if not hits:
+            return ''
+        return 'At the limit now: ' + '; '.join(
+            '%s%s (%s %s/%d, rule @%d "%s")' % (f['ip'], ' [LAN]' if f['lan'] else '', f['kind'],
+                                                 self._num(f['value']), f['limit'], f['rule'], f['descr'])
+            for f in hits[:5])
 
     def check_rules(self, now, all_rules):
         """ rules with "max states" close to their limit """
@@ -593,7 +667,7 @@ class Collector:
             'pf': self.pf, 'rules': self.rules, 'tables': self.tables, 'hints': hints,
             'sampling': {'devices': self.sample_devices, 'seconds': self.cfg['sample_seconds'],
                          'max_packets': self.cfg['sample_packets'], 'last': self.sample_info},
-            'rule_activity': self.rule_activity,
+            'rule_activity': self.rule_activity, 'src_limited': self.src_limited,
         })
 
     def read_blocked(self, now, day, lateral):
@@ -765,7 +839,7 @@ class Collector:
                                   ('hosts', 'last_seen'), ('services', 'last_probe'), ('lateral', 'last_seen'),
                                   ('l2bind', 'last_seen'), ('alerts', 'last_seen'), ('ts_pf', 'ts'),
                                   ('tablehits', 'last_seen'), ('blocked', 'last_seen'), ('ts_blocked', 'ts'),
-                                  ('ts_rules', 'ts')):
+                                  ('ts_rules', 'ts'), ('srclimits', 'last_seen')):
                 self.con.execute('DELETE FROM %s WHERE %s < ?' % (table, column), (cutoff,))
         self.pruned = now
 

@@ -116,6 +116,40 @@ def parse_rules(text):
     return rules
 
 
+SRC_NODE_RE = re.compile(
+    r'^(?P<ip>[0-9a-fA-F:.]+)(?:/\d+)?\s+->\s+\S+\s+\(\s*states (?P<states>\d+), connections (?P<conns>\d+),'
+    r' rate (?P<rate>[\d.]+)/(?P<secs>\d+)s\s*\)')
+SRC_RULE_RE = re.compile(r'filter rule (\d+)')
+# counters that a per source limit increments
+SRC_COUNTERS = ('src-limit', 'max-src-states', 'max-src-conn', 'max-src-conn-rate', 'max-src-nodes')
+
+
+def parse_src_nodes(text):
+    """
+    pfctl -sS -v (source tracking):
+        198.51.100.7 -> 0.0.0.0 ( states 3000, connections 12, rate 4.0/10s )
+           age 00:12:01, 40123 pkts, 9123456 bytes, filter rule 12
+    """
+    nodes, current = [], None
+    for line in text.splitlines():
+        match = SRC_NODE_RE.match(line.strip())
+        if match:
+            current = {'ip': match.group('ip'), 'states': int(match.group('states')),
+                       'connections': int(match.group('conns')), 'rate': float(match.group('rate')),
+                       'rate_seconds': int(match.group('secs')), 'rule': None}
+            nodes.append(current)
+            continue
+        if current is not None and current['rule'] is None:
+            found = SRC_RULE_RE.search(line)
+            if found:
+                current['rule'] = int(found.group(1))
+    return nodes
+
+
+def read_src_nodes():
+    return parse_src_nodes(_run([PFCTL, '-sS', '-v'], timeout=60))
+
+
 def parse_descriptions(text):
     """ label -> description from rules.debug ("... label "abc" # Block customer SMTP") """
     result = {}

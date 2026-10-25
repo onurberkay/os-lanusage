@@ -277,7 +277,25 @@ def cmd_limits(con, hours, ip, _extra):
             'SELECT tbl, ip, first_seen, last_seen FROM tablehits WHERE last_seen >= ?' + tclause
             + ' ORDER BY last_seen DESC', [since] + targs)
     ]
+    # sources at a per source limit: what is true now (status) merged with when it happened (srclimits)
+    src = {}
+    for f in status.get('src_limited', []):
+        if ip and f['ip'] != ip:
+            continue
+        src[(f['ip'], f['rule'], f['kind'])] = dict(f, now=True, peak=f['value'], hits=0, first_seen=0, last_seen=0)
+    sclause, sargs = (' AND ip = ?', [ip]) if ip else ('', [])
+    lan_hosts = set(r[0] for r in con.execute('SELECT ip FROM hosts'))
+    for host, nr, kind, descr, limit, peak, first, last, hits in con.execute(
+            'SELECT ip, nr, kind, descr, limit_value, peak, first_seen, last_seen, hits FROM srclimits'
+            ' WHERE last_seen >= ?' + sclause, [since] + sargs):
+        row = src.setdefault((host, nr, kind), {
+            'ip': host, 'lan': host in lan_hosts, 'rule': nr, 'descr': descr, 'kind': kind, 'limit': limit,
+            'value': None, 'pct': None, 'at_limit': False, 'now': False})
+        row.update(peak=max(peak or 0, row.get('peak') or 0), hits=hits, first_seen=first, last_seen=last)
+    src_limits = sorted(src.values(), key=lambda r: (not r['now'], -(r['pct'] or 0), -(r['last_seen'] or 0)))
+
     return {
+        'src_limits': src_limits,
         'pf': status.get('pf') or {}, 'status_time': status.get('time', 0), 'timeline': timeline,
         'counters': counters, 'hosts': hosts, 'tablehits': tablehits, 'tables': status.get('tables', []),
         'rules': status.get('rules', []),
@@ -493,7 +511,7 @@ def cmd_services(con, hours, ip, _direction):
 def cmd_clear(con, *_args):
     with con:
         for table in ('hosts', 'ts_host', 'ts_port', 'flows', 'services', 'lateral', 'l2bind', 'alerts',
-                      'ts_pf', 'tablehits', 'blocked', 'ts_blocked', 'ts_rules'):
+                      'ts_pf', 'tablehits', 'blocked', 'ts_blocked', 'ts_rules', 'srclimits'):
             con.execute('DELETE FROM %s' % table)
     con.execute('VACUUM')
     return {'status': 'ok'}
