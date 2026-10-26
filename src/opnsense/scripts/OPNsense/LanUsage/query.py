@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter, defaultdict
 
 from lib import common, detect, pfstats
 
@@ -329,7 +330,7 @@ def cmd_blocked(con, hours, ip, direction):
             [since] + args):
         totals[d] = totals.get(d, 0) + packets
         row = hosts.setdefault(host, {'ip': host, 'in': 0, 'out': 0, 'top_in': [], 'top_out': [],
-                                      'sources': 0, 'targets': 0})
+                                      'sources': 0, 'targets': 0, 'why_in': [], 'why_out': []})
         row[d] = packets
     ports, remotes = {}, {}
     for host, d, proto, port, remote, packets in con.execute(
@@ -352,16 +353,30 @@ def cmd_blocked(con, hours, ip, direction):
         if host in hosts:
             hosts[host]['sources' if d == 'in' else 'targets'] = sum(items.values())
     lan_hosts = set(r[0] for r in con.execute('SELECT ip FROM hosts'))
+    labels = (status.get('sampling') or {}).get('labels', {})
     flows = [
         {'ip': host, 'dir': d, 'proto': proto, 'port': port, 'remote': remote, 'packets': packets,
          'samples': samples, 'first_seen': first, 'last_seen': last, 'internal': remote in lan_hosts,
-         'name': detect.port_name(port, proto) if proto in ('tcp', 'udp') else ''}
-        for host, d, proto, port, remote, first, last, packets, samples in con.execute(
-            'SELECT ip, dir, proto, port, remote, MIN(first_seen), MAX(last_seen) AS l, SUM(packets), SUM(samples)'
+         'name': detect.port_name(port, proto) if proto in ('tcp', 'udp') else '', 'reason': reason or '',
+         'iface': ('%s (%s)' % (iface, labels[iface]) if labels.get(iface) else iface or '')}
+        for host, d, proto, port, remote, first, last, packets, samples, reason, iface in con.execute(
+            'SELECT ip, dir, proto, port, remote, MIN(first_seen), MAX(last_seen) AS l, SUM(packets), SUM(samples),'
+            ' MAX(reason), MAX(iface)'
             ' FROM blocked WHERE day >= ? AND last_seen >= ?' + clause + dclause
             + ' GROUP BY ip, dir, proto, port, remote ORDER BY SUM(packets) DESC LIMIT ?',
             [since - since % 86400, since] + args + dargs + [ROW_LIMIT])
     ]
+    reasons, per_host_reasons = Counter(), defaultdict(Counter)
+    for host, d, reason, packets in con.execute(
+            'SELECT ip, dir, reason, SUM(packets) FROM blocked_reasons WHERE day >= ? AND last_seen >= ?'
+            + clause + dclause + ' GROUP BY ip, dir, reason', [since - since % 86400, since] + args + dargs):
+        reasons[(d, reason)] += packets
+        per_host_reasons[(host, d)][reason] += packets
+    for (host, d), counter in per_host_reasons.items():
+        if host in hosts:
+            total = float(sum(counter.values())) or 1.0
+            hosts[host]['why_' + d] = [{'reason': r, 'pct': round(p * 100 / total)} for r, p in counter.most_common(3)]
+    reason_rows = [{'dir': d, 'reason': r, 'packets': p} for (d, r), p in reasons.most_common()]
     period = dict(((label, nr), packets) for label, nr, packets in con.execute(
         'SELECT label, MIN(nr), SUM(packets) FROM ts_rules WHERE ts >= ? GROUP BY label', [since]))
     rules = []
@@ -372,7 +387,7 @@ def cmd_blocked(con, hours, ip, direction):
         rules.append(rule)
     return {
         'timeline': timeline, 'totals': totals, 'hosts': sorted(hosts.values(), key=lambda r: -(r['in'] + r['out'])),
-        'flows': flows, 'rules': rules, 'sampling': status.get('sampling', {}),
+        'flows': flows, 'rules': rules, 'sampling': status.get('sampling', {}), 'reasons': reason_rows,
     }
 
 
@@ -511,7 +526,7 @@ def cmd_services(con, hours, ip, _direction):
 def cmd_clear(con, *_args):
     with con:
         for table in ('hosts', 'ts_host', 'ts_port', 'flows', 'services', 'lateral', 'l2bind', 'alerts',
-                      'ts_pf', 'tablehits', 'blocked', 'ts_blocked', 'ts_rules', 'srclimits'):
+                      'ts_pf', 'tablehits', 'blocked', 'ts_blocked', 'ts_rules', 'srclimits', 'blocked_reasons'):
             con.execute('DELETE FROM %s' % table)
     con.execute('VACUUM')
     return {'status': 'ok'}

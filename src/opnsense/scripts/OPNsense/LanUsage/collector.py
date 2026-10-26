@@ -112,6 +112,12 @@ class Collector:
         self.rules_last = None
         self.rule_activity = []
         self.src_limited = []
+        # block reasons: tables referenced by block rules, sources at a limit, last counter increases
+        self.reason_tables = []
+        self.reason_read = 0
+        self.src_at_limit = {}
+        self.last_deltas = {}
+        self.iface_labels = common.interface_labels()
 
     def capture_devices(self):
         names = [x.strip() for x in self.cfg['sample_interfaces'].split(',') if x.strip()]
@@ -266,12 +272,12 @@ class Collector:
             rates = {h: n / float(now - self.last_poll) for h, n in new_by_host.items()}
         self.last_poll = now
         self.read_blocked(now, day, lateral)
-        blocked, blocked_hosts, interval = self.classify_samples(now, day, samples, conns, lateral)
+        blocked, blocked_hosts, blocked_reasons, interval = self.classify_samples(now, day, samples, conns, lateral)
         self.store(now, ts_host, ts_port, flows, hosts, lateral)
         details = self.state_details(rates)
         with self.con:
-            self.store_blocked(now, day, bucket, blocked, blocked_hosts)
-            self.blocked_alerts(now, blocked, blocked_hosts, interval)
+            self.store_blocked(now, day, bucket, blocked, blocked_hosts, blocked_reasons)
+            self.blocked_alerts(now, blocked, blocked_hosts, blocked_reasons, interval)
             self.store_host_states(now, rates, details)
             scanners = self.scan_alerts(now)
             self.lateral_alerts(now, day, lateral, scanners)
@@ -288,16 +294,21 @@ class Collector:
         """
         A sampled attempt without a matching pf state was blocked (or dropped by a limit).
         Each sampled packet stands for interval / capture time packets.
-        returns ({(ip, dir, proto, port, remote): [estimated, sampled]}, {(ip, dir): estimated}, interval)
+        returns ({(ip, dir, proto, port, remote): [estimated, sampled, reason, device]},
+                 {(ip, dir): estimated}, {(ip, dir, reason): estimated}, interval)
         """
         interval = float(now - self.last_sample) if self.last_sample else float(self.cfg['poll_interval'])
         self.last_sample = now
-        blocked, per_host, info = {}, Counter(), {}
+        blocked, per_host, per_reason, info = {}, Counter(), Counter(), {}
         if not samples:
             self.sample_info = {}
-            return blocked, per_host, interval
+            return blocked, per_host, per_reason, interval
+        if not self.reason_read:
+            # first poll: know the block tables before the first classification
+            self.refresh_reason_tables(now, pfstats.read_rules())
         keys = set(conns)
         icmp_pairs = set((k[1], k[3]) for k in conns if k[0] in ('icmp', 'ipv6-icmp'))
+        reasons = {}
         for dev, res in samples.items():
             scale = max(1.0, interval / res['elapsed']) if res.get('elapsed') else 1.0
             count = 0
@@ -315,6 +326,9 @@ class Collector:
                     continue
                 count += 1
                 port = dport if proto in PORT_PROTOS else 0
+                reason = reasons.get((src, dst))
+                if reason is None:
+                    reason = reasons[(src, dst)] = self.block_reason(src, dst, not s_lan)
                 if s_lan and d_lan:
                     item = lateral.setdefault((day, src, dst, proto, port), [0, 0, 0, 0])
                     item[0] += scale
@@ -322,43 +336,97 @@ class Collector:
                     self.scan[src].append((now, dst, proto, port))
                 for ip, direction, remote, inside in ((src, 'out', dst, s_lan), (dst, 'in', src, d_lan)):
                     if inside:
-                        item = blocked.setdefault((ip, direction, proto, port, remote), [0.0, 0])
+                        item = blocked.setdefault((ip, direction, proto, port, remote), [0.0, 0, reason, dev])
                         item[0] += scale
                         item[1] += 1
                         per_host[(ip, direction)] += scale
+                        per_reason[(ip, direction, reason)] += scale
             info[dev] = {'lines': res.get('lines', 0), 'elapsed': res.get('elapsed', 0), 'capped': res.get('capped'),
-                         'blocked': count, 'scale': round(scale, 1), 'error': res.get('error', '')}
+                         'blocked': count, 'scale': round(scale, 1), 'error': res.get('error', ''),
+                         'label': self.iface_labels.get(dev, '')}
         self.sample_info = info
-        return blocked, per_host, interval
+        return blocked, per_host, per_reason, interval
 
-    def store_blocked(self, now, day, bucket, blocked, per_host):
+    def block_reason(self, src, dst, from_outside):
+        """
+        Best known cause of a blocked attempt, without firewall logging:
+        a table a block rule matches on, a per source limit, a full state table, a bogon source,
+        otherwise no pass rule matched (default deny or a block rule we cannot name).
+        """
+        for ref in self.reason_tables:
+            if (src if ref['side'] == 'from' else dst) in ref['index']:
+                return '<%s> rule @%d %s' % (ref['table'], ref['nr'], ref['descr'])
+        limit = self.src_at_limit.get(src)
+        if limit is not None:
+            return '%s limit rule @%d %s' % (limit['kind'], limit['rule'], limit['descr'])
+        if self.last_deltas.get('memory'):
+            return 'state table full (pf memory limit)'
+        if from_outside and common.is_bogon(src):
+            return 'private / bogon source'
+        return 'no pass rule (default deny or a block rule)'
+
+    def refresh_reason_tables(self, now, rules):
+        """ tables used by block rules (CrowdSec, virusprot, bogons, aliases ...) with their entries """
+        self.reason_read = now
+        descriptions = pfstats.rule_descriptions()
+        cache, refs = {}, []
+        for rule in rules:
+            if rule['action'] != 'block':
+                continue
+            for side, table in rule.get('tables', []):
+                if table not in cache:
+                    cache[table] = common.AddrIndex(pfstats.table_entries(table))
+                if cache[table].size:
+                    refs.append({'nr': rule['nr'], 'side': side, 'table': table, 'index': cache[table],
+                                 'descr': descriptions.get(rule['label'], '') or rule['text'][:60]})
+        self.reason_tables = refs
+
+    def store_blocked(self, now, day, bucket, blocked, per_host, per_reason):
         if not blocked:
             return
         # keep the 20 busiest remotes per host/port, fold the rest (big DDoS) into "others"
         grouped = defaultdict(list)
         for (ip, direction, proto, port, remote), value in blocked.items():
-            grouped[(ip, direction, proto, port)].append((value[0], remote, value[1]))
+            grouped[(ip, direction, proto, port)].append((value[0], remote, value[1], value[2], value[3]))
         rows = []
         for (ip, direction, proto, port), items in grouped.items():
-            items.sort(reverse=True)
+            items.sort(key=lambda i: -i[0])
             if not self.cfg['track_remote']:
-                items = [(sum(i[0] for i in items), '*', sum(i[2] for i in items))]
+                items = [(sum(i[0] for i in items), '*', sum(i[2] for i in items), items[0][3], items[0][4])]
             elif len(items) > 20:
                 rest = items[20:]
-                items = items[:20] + [(sum(i[0] for i in rest), 'others (%d)' % len(rest), sum(i[2] for i in rest))]
-            for est, remote, sampled in items:
-                rows.append((day, ip, direction, proto, port, remote, now, now, int(round(est)), sampled))
+                why = Counter()
+                for i in rest:
+                    why[(i[3], i[4])] += i[0]
+                reason, dev = why.most_common(1)[0][0]
+                items = items[:20] + [(sum(i[0] for i in rest), 'others (%d)' % len(rest),
+                                       sum(i[2] for i in rest), reason, dev)]
+            for est, remote, sampled, reason, dev in items:
+                rows.append((day, ip, direction, proto, port, remote, now, now, int(round(est)), sampled, reason, dev))
         self.con.executemany(
-            """INSERT INTO blocked (day, ip, dir, proto, port, remote, first_seen, last_seen, packets, samples)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO blocked (day, ip, dir, proto, port, remote, first_seen, last_seen, packets, samples,
+                                    reason, iface)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (day, ip, dir, proto, port, remote) DO UPDATE SET last_seen = excluded.last_seen,
-                   packets = packets + excluded.packets, samples = samples + excluded.samples""", rows)
+                   packets = packets + excluded.packets, samples = samples + excluded.samples,
+                   reason = excluded.reason, iface = excluded.iface""", rows)
         self.con.executemany(
             """INSERT INTO ts_blocked (ts, ip, dir, packets) VALUES (?, ?, ?, ?)
                ON CONFLICT (ts, ip, dir) DO UPDATE SET packets = packets + excluded.packets""",
             [(bucket, ip, direction, int(round(est))) for (ip, direction), est in per_host.items()])
+        self.con.executemany(
+            """INSERT INTO blocked_reasons (day, ip, dir, reason, packets, last_seen) VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (day, ip, dir, reason) DO UPDATE SET packets = packets + excluded.packets,
+                   last_seen = excluded.last_seen""",
+            [(day, ip, direction, reason, int(round(est)), now) for (ip, direction, reason), est in per_reason.items()])
 
-    def blocked_alerts(self, now, blocked, per_host, interval):
+    @staticmethod
+    def reason_text(per_reason, ip, direction):
+        mine = [(est, reason) for (rip, rdir, reason), est in per_reason.items() if rip == ip and rdir == direction]
+        total = sum(est for est, _ in mine) or 1
+        return ', '.join('%d%% %s' % (round(est * 100 / total), reason) for est, reason in sorted(mine, reverse=True)[:3])
+
+    def blocked_alerts(self, now, blocked, per_host, per_reason, interval):
         hour = now - now % 3600
         for (ip, direction), est in per_host.items():
             pps = est / interval if interval else 0
@@ -372,16 +440,17 @@ class Collector:
                     remotes.add(remote)
             top = ', '.join('%s %s' % (p, detect.port_name(int(p.split('/')[1]), p.split('/')[0]) if '/' in p else '')
                             for p, _ in ports.most_common(3))
+            why = self.reason_text(per_reason, ip, direction)
             if direction == 'out':
                 self.alert(now, 'blocked_out', 'high', 'blocked_out:%s:%d' % (ip, hour), ip=ip, reopen=False,
-                           detail='%s sends ~%.0f pkt/s that the firewall blocks, to %d destinations (top: %s): '
+                           detail='%s sends ~%.0f pkt/s that the firewall blocks, to %d destinations (top: %s; why: %s): '
                                   'possible spam, scan or compromised host (estimated from samples)'
-                                  % (ip, pps, len(remotes), top))
+                                  % (ip, pps, len(remotes), top, why))
             else:
                 self.alert(now, 'blocked_in', 'critical' if pps >= 10 * limit else 'medium',
                            'blocked_in:%s:%d' % (ip, hour), ip=ip, reopen=False,
-                           detail='~%.0f pkt/s towards %s blocked, from %d sources (top: %s): attack being blocked '
-                                  '(estimated from samples)' % (pps, ip, len(remotes), top))
+                           detail='~%.0f pkt/s towards %s blocked, from %d sources (top: %s; why: %s): attack being '
+                                  'blocked (estimated from samples)' % (pps, ip, len(remotes), top, why))
 
     def rule_counters(self, now, rules):
         """ exact blocked packets per block rule from the pf rule counters (rules sharing a label are summed) """
@@ -501,9 +570,12 @@ class Collector:
             (bucket, max(info['states'], row[0] if row else 0), states_limit,
              max(info['src_nodes'], row[1] if row else 0), src_limit, json.dumps(merged)))
 
+        self.last_deltas = deltas
         rules = pfstats.read_rules()
         self.rule_counters(now, rules)
         self.check_src_nodes(now, rules)
+        if self.sample_devices and now - self.reason_read >= 60:
+            self.refresh_reason_tables(now, rules)
 
         if states_limit:
             pct = info['states'] * 100.0 / states_limit
@@ -536,6 +608,7 @@ class Collector:
                                                     for k in r['options'])}
         if not limited:
             self.src_limited = []
+            self.src_at_limit = {}
             return
         descriptions = pfstats.rule_descriptions()
         hour = now - now % 3600
@@ -565,6 +638,7 @@ class Collector:
         found.sort(key=lambda f: (-f['pct'], f['ip']))
         self.src_limited = found[:200]
         at_limit = [f for f in found if f['at_limit']]
+        self.src_at_limit = {f['ip']: f for f in at_limit}
         self.con.executemany(
             """INSERT INTO srclimits (ip, nr, kind, descr, limit_value, peak, first_seen, last_seen, hits)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -666,7 +740,9 @@ class Collector:
                           'blocked_lan_last_poll': self.blocked_last},
             'pf': self.pf, 'rules': self.rules, 'tables': self.tables, 'hints': hints,
             'sampling': {'devices': self.sample_devices, 'seconds': self.cfg['sample_seconds'],
-                         'max_packets': self.cfg['sample_packets'], 'last': self.sample_info},
+                         'max_packets': self.cfg['sample_packets'], 'last': self.sample_info,
+                         'labels': {d: self.iface_labels.get(d, '') for d in self.sample_devices},
+                         'reason_tables': sorted(set('<%s> @%d' % (r['table'], r['nr']) for r in self.reason_tables))},
             'rule_activity': self.rule_activity, 'src_limited': self.src_limited,
         })
 
@@ -839,7 +915,7 @@ class Collector:
                                   ('hosts', 'last_seen'), ('services', 'last_probe'), ('lateral', 'last_seen'),
                                   ('l2bind', 'last_seen'), ('alerts', 'last_seen'), ('ts_pf', 'ts'),
                                   ('tablehits', 'last_seen'), ('blocked', 'last_seen'), ('ts_blocked', 'ts'),
-                                  ('ts_rules', 'ts'), ('srclimits', 'last_seen')):
+                                  ('ts_rules', 'ts'), ('srclimits', 'last_seen'), ('blocked_reasons', 'last_seen')):
                 self.con.execute('DELETE FROM %s WHERE %s < ?' % (table, column), (cutoff,))
         self.pruned = now
 

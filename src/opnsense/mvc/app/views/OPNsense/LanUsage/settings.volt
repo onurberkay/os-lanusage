@@ -57,12 +57,15 @@ $(function () {
                 ['Blocked sampling', (function () {
                     const sm = s.sampling || {};
                     const last = sm.last || {};
+                    const labels = sm.labels || {};
                     const parts = Object.keys(last).map(function (d) {
                         const x = last[d];
-                        return d + ': ' + (x.error ? 'ERROR ' + x.error : x.lines + ' attempts in ' + x.elapsed + ' s, ' +
-                               x.blocked + ' blocked' + (x.capped ? ' (cap reached)' : ''));
+                        return d + (labels[d] ? ' (' + labels[d] + ')' : '') + ': ' + (x.error ? 'ERROR ' + x.error :
+                               x.lines + ' attempts in ' + x.elapsed + ' s, ' + x.blocked + ' blocked' +
+                               (x.capped ? ' (cap reached)' : ''));
                     });
-                    return (sm.devices || []).length ? parts.join('; ') || 'waiting for the first poll' : 'off';
+                    const tables = (sm.reason_tables || []).length ? ' | block reasons from ' + sm.reason_tables.join(', ') : '';
+                    return (sm.devices || []).length ? (parts.join('; ') || 'waiting for the first poll') + tables : 'off';
                 })()],
                 ['Firewall log', s.filterlog.enabled ? (s.filterlog.readable ? 'readable' : 'NOT readable') + ', ' +
                     s.filterlog.blocked_lan_last_poll + ' blocked LAN to LAN packets in the last poll' : 'not read'],

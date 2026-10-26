@@ -35,6 +35,22 @@ Block kuralları loglamıyorsa (saldırıda log patlamasın diye) engellenen tra
 2. **Block kuralı sayaçları (kesin):** Her poll'da `pfctl -vvsr` ile block kurallarının paket sayaçları okunur. Kural başına
    anlık paket/sn ve dönem toplamı gösterilir. Açıklamalar `/tmp/rules.debug`'dan alınır. Host bilgisi vermez ama kesin değerdir.
 
+**Nerede bakılıyor:** Yön adrese göre belirlenir: hedef müşteri ağınızdaysa "in", kaynak müşteri ağınızdaysa "out".
+Transparent bridge'de varsayılan olarak bridge'in tüm üyeleri dinlenir. İnternetten gelen ve engellenen bir paket,
+pf'in onu düşürdüğü **WAN (upstream) üyesinde** görülür. Her engellenen denemede hangi arayüzde görüldüğü
+OPNsense'teki adıyla yazar, ör. `igb0 (WAN)`.
+
+**Neden engellendi (log olmadan):** Her engellenen deneme sırayla şunlarla eşleştirilir:
+
+1. Block kurallarının kullandığı pf tabloları (CrowdSec, virusprot, bogons, alias'lar): `<tablo> rule @N açıklama`
+2. Kaynak başına limit (max-src-states / max-src-conn / max-src-conn-rate): `... limit rule @N açıklama`
+3. O anda dolu state tablosu (pf `memory` sayacı artmışsa)
+4. Dışarıdan gelen özel/bogon kaynak adresi
+5. Hiçbiri değilse: `no pass rule (default deny or a block rule)`. Hangi block kuralının durdurduğu log olmadan bilinemez;
+   kesin sayılar Block rules tablosundadır.
+
+Blocked sekmesinde sebep dağılımı grafiği, host başına ilk 3 sebep ve her denemenin sebebi gösterilir. Uyarılarda da "why:" olarak yazar.
+
 Uyarılar:
 
 | Tür | Varsayılan eşik | Anlamı |

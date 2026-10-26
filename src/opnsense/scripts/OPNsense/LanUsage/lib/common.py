@@ -128,6 +128,10 @@ CREATE TABLE IF NOT EXISTS ts_rules (
     ts INTEGER, nr INTEGER, label TEXT, descr TEXT, packets INTEGER,
     PRIMARY KEY (ts, label, nr)
 );
+CREATE TABLE IF NOT EXISTS blocked_reasons (
+    day INTEGER, ip TEXT, dir TEXT, reason TEXT, packets INTEGER DEFAULT 0, last_seen INTEGER,
+    PRIMARY KEY (day, ip, dir, reason)
+);
 CREATE TABLE IF NOT EXISTS srclimits (
     ip TEXT, nr INTEGER, kind TEXT, descr TEXT, limit_value INTEGER, peak INTEGER,
     first_seen INTEGER, last_seen INTEGER, hits INTEGER DEFAULT 0,
@@ -142,6 +146,7 @@ CREATE TABLE IF NOT EXISTS tablehits (
 # columns added after 1.0, created on existing databases by connect()
 MIGRATIONS = {
     'hosts': (('states', 'INTEGER DEFAULT 0'), ('state_detail', "TEXT DEFAULT ''"), ('new_rate', 'REAL DEFAULT 0')),
+    'blocked': (('reason', "TEXT DEFAULT ''"), ('iface', "TEXT DEFAULT ''")),
 }
 
 
@@ -297,6 +302,68 @@ class NetworkSet:
 
     def __str__(self):
         return ', '.join(str(n) for n in self.networks) or '(none)'
+
+
+class AddrIndex:
+    """
+    membership test for large pf tables (CrowdSec lists hold tens of thousands of entries):
+    host entries in a set, networks grouped per prefix length so a lookup costs one mask per length
+    """
+
+    def __init__(self, entries):
+        self.hosts = set()
+        self.nets = {}
+        self.size = 0
+        for entry in entries:
+            try:
+                net = ipaddress.ip_network(entry.strip(), strict=False)
+            except ValueError:
+                continue
+            self.size += 1
+            if net.prefixlen == net.max_prefixlen:
+                self.hosts.add(str(net.network_address))
+            else:
+                self.nets.setdefault((net.version, net.prefixlen), set()).add(int(net.network_address))
+
+    def __contains__(self, ip):
+        if ip in self.hosts:
+            return True
+        if not self.nets:
+            return False
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        value, bits = int(addr), addr.max_prefixlen
+        for (version, prefix), nets in self.nets.items():
+            if version == addr.version and (value >> (bits - prefix)) << (bits - prefix) in nets:
+                return True
+        return False
+
+
+def is_bogon(ip):
+    """ private, reserved and other addresses that never come from the internet """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_reserved or addr.is_loopback or addr.is_link_local or addr.is_multicast \
+        or addr.is_unspecified
+
+
+def interface_labels():
+    """ device -> "WAN" / "LAN" / description, as named in the OPNsense configuration """
+    try:
+        root = ET.parse(CONFIG_XML).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    labels = {}
+    section = root.find('interfaces')
+    for node in (section if section is not None else []):
+        device = (node.findtext('if') or '').strip()
+        if device:
+            labels[device] = (node.findtext('descr') or '').strip() or node.tag.upper()
+    return labels
 
 
 def resolve_networks(cfg):

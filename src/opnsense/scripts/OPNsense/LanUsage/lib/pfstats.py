@@ -51,6 +51,7 @@ RULE_OPTS = {
     'max-src-conn-rate': re.compile(r'max-src-conn-rate (\d+/\d+)'),
 }
 LABEL_RE = re.compile(r'label "([^"]*)"')
+TABLE_REF_RE = re.compile(r'\b(?P<side>from|to)\s+(?P<neg>!\s*)?<(?P<table>[^>]+)>')
 
 
 def _run(args, timeout=30):
@@ -102,8 +103,10 @@ def parse_rules(text):
                     options[key] = found.group(1)
             label = LABEL_RE.search(match.group('text'))
             text = LABEL_RE.sub('', match.group('text')).strip()
+            tables = [(m.group('side'), m.group('table')) for m in TABLE_REF_RE.finditer(text) if not m.group('neg')]
             current = {'nr': int(match.group('nr')), 'action': text.split(' ', 1)[0], 'text': text[:200],
-                       'label': label.group(1) if label else '', 'options': options, 'states': 0, 'packets': 0}
+                       'label': label.group(1) if label else '', 'options': options, 'states': 0, 'packets': 0,
+                       'tables': tables}
             rules.append(current)
             continue
         if current is not None:

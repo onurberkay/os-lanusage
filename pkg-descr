@@ -7,6 +7,14 @@ RDP, DNS, NTP, optionally nmap -sV).
 Plugin Changelog
 ================
 
+1.5
+
+* Why blocked, without logging: each sampled blocked attempt is matched against
+  the tables that block rules use (CrowdSec, virusprot, bogons, aliases), per
+  source limits, a full state table and bogon sources; otherwise "no pass rule"
+* "Why blocked" chart, reason per host and per attempt, reasons in the alerts
+* Interfaces are shown with their OPNsense name, e.g. igb0 (WAN)
+
 1.4
 
 * Per source limits (max-src-states, max-src-conn, max-src-conn-rate) are read

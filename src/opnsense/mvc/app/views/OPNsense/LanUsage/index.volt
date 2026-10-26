@@ -264,6 +264,26 @@ $(function () {
         rule_blocking: 'Block rule busy',
         src_limit: 'Source at rule limit'
     };
+    /* block reasons: table hit / limit / state table / bogon / no pass rule */
+    function reasonClass(reason) {
+        reason = String(reason || '');
+        if (reason.charAt(0) === '<') return 'lan';
+        if (reason.indexOf('limit') > -1 || reason.indexOf('state table') > -1) return 'warn';
+        if (reason.indexOf('bogon') > -1) return 'out';
+        return '';
+    }
+    function whyText(list) {
+        return (list || []).map(function (w) { return w.reason; }).join(' ');
+    }
+    function whyHtml(list) {
+        return (list || []).map(function (w) {
+            return '<span class="lu-badge ' + reasonClass(w.reason) + '" title="' + esc(w.reason) + '">' +
+                   esc(w.pct) + '% ' + esc(String(w.reason).length > 34 ? String(w.reason).slice(0, 33) + '…' : w.reason) + '</span>';
+        }).join(' ');
+    }
+    function devLabel(dev, labels) {
+        return labels && labels[dev] ? dev + ' (' + labels[dev] + ')' : dev;
+    }
     function pctBar(pct) {
         const p = Math.min(100, Math.max(0, Number(pct) || 0));
         const color = p >= 100 ? '#d9534f' : (p >= 80 ? '#e8942f' : '#2a9fd6');
@@ -401,13 +421,17 @@ $(function () {
              html: function (r) { return r.top_out.map(function (p) {
                  return '<span class="lu-badge out">' + esc(p.proto + '/' + p.port) + (p.name ? ' ' + esc(p.name) : '') + '</span>';
              }).join(''); }},
+            {key: 'why_out', label: 'Why (out)', nosort: true, text: function (r) { return whyText(r.why_out); },
+             html: function (r) { return whyHtml(r.why_out); }},
             {key: 'in', label: 'Blocked inbound', cls: 'num', num: true, html: function (r) { return fmtNum(r.in); }},
             {key: 'sources', label: 'Sources', cls: 'num', num: true},
             {key: 'top_in', label: 'Attacked ports', nosort: true,
              text: function (r) { return r.top_in.map(function (p) { return p.proto + '/' + p.port + ' ' + p.name; }).join(' '); },
              html: function (r) { return r.top_in.map(function (p) {
                  return '<span class="lu-badge in">' + esc(p.proto + '/' + p.port) + (p.name ? ' ' + esc(p.name) : '') + '</span>';
-             }).join(''); }}
+             }).join(''); }},
+            {key: 'why_in', label: 'Why (in)', nosort: true, text: function (r) { return whyText(r.why_in); },
+             html: function (r) { return whyHtml(r.why_in); }}
         ], 'out', function (r) { return r.out > 0 ? 'lu-row-warn' : ''; }),
 
         blockedFlows: makeTable('lu-blocked-flows', [
@@ -420,6 +444,8 @@ $(function () {
              html: function (r) { return r.internal ? ipLink(r.remote) + ' <span class="lu-badge lan">LAN↔LAN</span>' : esc(r.remote); }},
             {key: 'packets', label: 'Packets (est.)', cls: 'num', num: true, html: function (r) { return fmtNum(r.packets); }},
             {key: 'samples', label: 'Sampled', cls: 'num', num: true},
+            {key: 'reason', label: 'Why blocked', html: function (r) { return '<span class="lu-badge ' + reasonClass(r.reason) + '">' + esc(r.reason) + '</span>'; }},
+            {key: 'iface', label: 'Seen on', cls: 'nowrap'},
             {key: 'first_seen', label: 'First seen', num: true, cls: 'nowrap', html: function (r) { return esc(fmtDate(r.first_seen)); }},
             {key: 'last_seen', label: 'Last seen', num: true, cls: 'nowrap', html: function (r) { return ago(r.last_seen); }}
         ], 'packets', function (r) { return r.internal || r.dir === 'out' ? 'lu-row-warn' : ''; }),
@@ -679,7 +705,7 @@ $(function () {
             ['Blocked outbound', fmtNum(d.totals.out), 'packets sent by LAN hosts (est.)', d.totals.out > 0],
             ['Blocked inbound', fmtNum(d.totals.in), 'packets towards LAN hosts (est.)'],
             ['Block rules now', fmtNum(nowRules) + ' pkt/s', 'exact, pf rule counters'],
-            ['Sampling', devs.length ? devs.join(', ') : 'off',
+            ['Sampling', devs.length ? devs.map(function (k) { return devLabel(k, sampling.labels); }).join(', ') : 'off',
              devs.length ? sampling.seconds + ' s / ' + fmtNum(sampling.max_packets) + ' packets per poll' +
                  (capped.length ? ', cap reached on ' + capped.join(', ') : '') : 'enable it in the settings']
         ];
@@ -692,6 +718,13 @@ $(function () {
         }), {series: [{label: 'blocked towards LAN hosts (pkt/s)', color: COLOR_IN},
                       {label: 'blocked from LAN hosts (pkt/s)', color: COLOR_OUT}],
              format: fmtNum, timeFormat: fmtTime, height: 220});
+        LUCharts.hbar(document.getElementById('lu-blocked-why'), (d.reasons || []).slice(0, 10).map(function (r) {
+            return {label: r.reason, sub: r.dir === 'in' ? 'in' : 'out', value: r.packets,
+                    color: r.dir === 'in' ? COLOR_IN : COLOR_OUT, row: r};
+        }), {format: fmtNum, tip: function (item) {
+            return [[null, item.row.reason], [item.color, (item.row.dir === 'in' ? 'towards LAN hosts' : 'from LAN hosts') +
+                    ': ' + fmtNum(item.row.packets) + ' packets (est.)']];
+        }});
         tables.blockedHosts.setRows(d.hosts);
         tables.blockedFlows.setRows(d.flows);
         tables.blockRules.setRows(d.rules);
@@ -1017,6 +1050,11 @@ $(function () {
             <div class="lu-panel wide">
                 <h4>{{ lang._('Blocked packets per second (estimated)') }}</h4>
                 <div class="lu-chart" id="lu-blocked-chart"></div>
+            </div>
+            <div class="lu-panel wide">
+                <h4>{{ lang._('Why blocked') }}</h4>
+                <div class="lu-note">{{ lang._('Without logging: a source in a table that a block rule uses (CrowdSec, virusprot, bogons, aliases), a per source limit, a full state table, a private / bogon source. Everything else did not match any pass rule (default deny or a block rule that cannot be named without logging).') }}</div>
+                <div class="lu-chart" id="lu-blocked-why"></div>
             </div>
         </div>
         <div class="lu-pane" id="lu-blocked-hosts">
