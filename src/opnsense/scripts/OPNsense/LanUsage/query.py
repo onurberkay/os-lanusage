@@ -295,7 +295,20 @@ def cmd_limits(con, hours, ip, _extra):
         row.update(peak=max(peak or 0, row.get('peak') or 0), hits=hits, first_seen=first, last_seen=last)
     src_limits = sorted(src.values(), key=lambda r: (not r['now'], -(r['pct'] or 0), -(r['last_seen'] or 0)))
 
+    hclause, hargs = (' AND ip = ?', [ip]) if ip else ('', [])
+    shaper_hits = [
+        {'ip': host, 'kind': kind, 'nr': nr, 'descr': descr, 'limit': limit, 'peak_bps': peak, 'first_seen': first,
+         'last_seen': last, 'drops': drops, 'lan': host in lan_hosts}
+        for host, kind, nr, descr, limit, peak, first, last, drops in con.execute(
+            'SELECT ip, kind, nr, descr, limit_bps, peak_bps, first_seen, last_seen, drops FROM shaperhits'
+            ' WHERE last_seen >= ?' + hclause + ' ORDER BY drops DESC LIMIT 500', [since] + hargs)
+    ]
+    shaper_now = status.get('shaper') or {}
+    if ip:
+        shaper_now = dict(shaper_now, flows=[f for f in shaper_now.get('flows', []) if f['ip'] == ip])
+
     return {
+        'shaper': shaper_now, 'shaper_hits': shaper_hits,
         'src_limits': src_limits,
         'pf': status.get('pf') or {}, 'status_time': status.get('time', 0), 'timeline': timeline,
         'counters': counters, 'hosts': hosts, 'tablehits': tablehits, 'tables': status.get('tables', []),
@@ -526,7 +539,8 @@ def cmd_services(con, hours, ip, _direction):
 def cmd_clear(con, *_args):
     with con:
         for table in ('hosts', 'ts_host', 'ts_port', 'flows', 'services', 'lateral', 'l2bind', 'alerts',
-                      'ts_pf', 'tablehits', 'blocked', 'ts_blocked', 'ts_rules', 'srclimits', 'blocked_reasons'):
+                      'ts_pf', 'tablehits', 'blocked', 'ts_blocked', 'ts_rules', 'srclimits', 'blocked_reasons',
+                      'shaperhits'):
             con.execute('DELETE FROM %s' % table)
     con.execute('VACUUM')
     return {'status': 'ok'}

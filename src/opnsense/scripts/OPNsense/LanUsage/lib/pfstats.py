@@ -51,6 +51,7 @@ RULE_OPTS = {
     'max-src-conn-rate': re.compile(r'max-src-conn-rate (\d+/\d+)'),
 }
 LABEL_RE = re.compile(r'label "([^"]*)"')
+TRACK_RE = re.compile(r'source-track (rule|global)')
 TABLE_REF_RE = re.compile(r'\b(?P<side>from|to)\s+(?P<neg>!\s*)?<(?P<table>[^>]+)>')
 
 
@@ -104,9 +105,17 @@ def parse_rules(text):
             label = LABEL_RE.search(match.group('text'))
             text = LABEL_RE.sub('', match.group('text')).strip()
             tables = [(m.group('side'), m.group('table')) for m in TABLE_REF_RE.finditer(text) if not m.group('neg')]
+            # per source limits without "source-track rule" use pf's default, global tracking:
+            # one source node per address shared by all such rules, -sS then names no rule
+            tracking = ''
+            found = TRACK_RE.search(text)
+            if found:
+                tracking = found.group(1)
+            elif any(k.startswith('max-src-') for k in options):
+                tracking = 'global'
             current = {'nr': int(match.group('nr')), 'action': text.split(' ', 1)[0], 'text': text[:200],
                        'label': label.group(1) if label else '', 'options': options, 'states': 0, 'packets': 0,
-                       'tables': tables}
+                       'tables': tables, 'tracking': tracking}
             rules.append(current)
             continue
         if current is not None:

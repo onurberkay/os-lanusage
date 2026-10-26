@@ -56,6 +56,7 @@ DEFAULTS = {
     'host_rate_limit': 300,
     'state_warn_pct': 80,
     'watch_tables': 'virusprot,sshlockout,crowdsec',
+    'shaper_drop_pps': 5,
 }
 STATUS_FILE = os.path.join(DB_DIR, 'status.json')
 
@@ -131,6 +132,11 @@ CREATE TABLE IF NOT EXISTS ts_rules (
 CREATE TABLE IF NOT EXISTS blocked_reasons (
     day INTEGER, ip TEXT, dir TEXT, reason TEXT, packets INTEGER DEFAULT 0, last_seen INTEGER,
     PRIMARY KEY (day, ip, dir, reason)
+);
+CREATE TABLE IF NOT EXISTS shaperhits (
+    ip TEXT, kind TEXT, nr INTEGER, descr TEXT, limit_bps INTEGER, peak_bps INTEGER,
+    first_seen INTEGER, last_seen INTEGER, drops INTEGER DEFAULT 0,
+    PRIMARY KEY (ip, kind, nr)
 );
 CREATE TABLE IF NOT EXISTS srclimits (
     ip TEXT, nr INTEGER, kind TEXT, descr TEXT, limit_value INTEGER, peak INTEGER,

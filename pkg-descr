@@ -7,6 +7,16 @@ RDP, DNS, NTP, optionally nmap -sV).
 Plugin Changelog
 ================
 
+1.6
+
+* Rule limits read from every rule: max, max-src-nodes, max-src-states,
+  max-src-conn, max-src-conn-rate, with their fill ratio and busiest source
+* Global source tracking (pf's default, what OPNsense rules use) is now
+  matched; 1.4/1.5 only matched "source-track rule" nodes
+* Traffic shaper: pipes / queues with their bandwidth limit, mask, description
+  and shaper rules, throughput and drops per IP, "Shaper limit reached" alerts
+* Block reasons: shaper drops, sources near a limit, rule max states full
+
 1.5
 
 * Why blocked, without logging: each sampled blocked attempt is matched against

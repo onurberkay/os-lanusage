@@ -27,7 +27,7 @@ import time
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-from lib import common, detect, filterlog, l2, pfstate, pfstats, sampler
+from lib import common, detect, filterlog, l2, pfstate, pfstats, sampler, shaper
 
 PORT_PROTOS = ('tcp', 'udp', 'sctp')
 TCP_ANSWERED = {'ESTABLISHED', 'FIN_WAIT_1', 'FIN_WAIT_2', 'CLOSE_WAIT', 'CLOSING', 'LAST_ACK'}
@@ -116,7 +116,16 @@ class Collector:
         self.reason_tables = []
         self.reason_read = 0
         self.src_at_limit = {}
+        self.src_near = {}
+        self.rules_full = []
         self.last_deltas = {}
+        # traffic shaper: previous flow counters for rates, config.xml cache
+        self.shaper_prev = {}
+        self.shaper_last = None
+        self.shaper_cfg = {'pipes': {}, 'queues': {}, 'rules': []}
+        self.shaper_cfg_mtime = None
+        self.shaper = {}
+        self.shaper_drops = {}
         self.iface_labels = common.interface_labels()
 
     def capture_devices(self):
@@ -359,6 +368,16 @@ class Collector:
         limit = self.src_at_limit.get(src)
         if limit is not None:
             return '%s limit rule @%d %s' % (limit['kind'], limit['rule'], limit['descr'])
+        for ip in (src, dst):
+            drop = self.shaper_drops.get(ip)
+            if drop is not None:
+                return 'shaper %s rate limit drops' % drop['label']
+        near = self.src_near.get(src)
+        if near is not None:
+            return 'near %s limit rule @%d %s (likely)' % (near['kind'], near['rule'], near['descr'])
+        if self.rules_full and (self.last_deltas.get('state-limit') or self.last_deltas.get('max states per rule')):
+            rule = self.rules_full[0]
+            return 'rule @%d max states full %s (likely)' % (rule['nr'], rule['descr'])
         if self.last_deltas.get('memory'):
             return 'state table full (pf memory limit)'
         if from_outside and common.is_bogon(src):
@@ -573,7 +592,10 @@ class Collector:
         self.last_deltas = deltas
         rules = pfstats.read_rules()
         self.rule_counters(now, rules)
-        self.check_src_nodes(now, rules)
+        nodes = pfstats.read_src_nodes() if any(r['tracking'] for r in rules) else []
+        self.check_src_nodes(now, rules, nodes)
+        self.check_rules(now, rules, nodes)
+        self.check_shaper(now)
         if self.sample_devices and now - self.reason_read >= 60:
             self.refresh_reason_tables(now, rules)
 
@@ -592,53 +614,68 @@ class Collector:
                                              % (name, delta, meaning, culprit or 'Top LAN hosts: '
                                                 + self.top_hosts_text(rates)))
 
-        if now - self.rules_read >= 60:
-            self.rules_read = now
-            self.check_rules(now, rules)
         if now - self.tables_read >= 60:
             self.tables_read = now
             self.check_tables(now)
 
-    def check_src_nodes(self, now, rules):
+    @staticmethod
+    def src_checks(options, node):
+        """ (kind, current value, limit) for every per source limit of a rule """
+        checks = []
+        if 'max-src-states' in options:
+            checks.append(('max-src-states', node['states'], int(options['max-src-states'])))
+        if 'max-src-conn' in options:
+            checks.append(('max-src-conn', node['connections'], int(options['max-src-conn'])))
+        if 'max-src-conn-rate' in options:
+            checks.append(('max-src-conn-rate', node['rate'], int(options['max-src-conn-rate'].split('/')[0])))
+        return checks
+
+    @staticmethod
+    def nodes_of(rule, nodes):
+        """
+        Source nodes a rule's per source limits apply to. With "source-track rule" pf keeps nodes per rule
+        (-sS names the rule); with global tracking (pf's default, what OPNsense generates) one node per
+        address is shared by all those rules and -sS names none.
+        """
+        if rule['tracking'] == 'rule':
+            return [n for n in nodes if n['rule'] == rule['nr']]
+        return [n for n in nodes if n['rule'] is None or n['rule'] == rule['nr']]
+
+    def check_src_nodes(self, now, rules, nodes):
         """
         Per source limits (max-src-states, max-src-conn, max-src-conn-rate) from the source tracking
-        table: name the source address and the rule that is at (>= 90%) its limit.
+        table: name the source address and the rule at (>= 90%) its limit. With global tracking a node
+        is compared with every rule using it and the strictest one is reported.
         """
-        limited = {r['nr']: r for r in rules if any(k.startswith('max-src-') and k != 'max-src-nodes'
-                                                    for k in r['options'])}
+        limited = [r for r in rules if r['tracking'] and any(k in r['options'] for k in
+                                                             ('max-src-states', 'max-src-conn', 'max-src-conn-rate'))]
         if not limited:
-            self.src_limited = []
-            self.src_at_limit = {}
+            self.src_limited, self.src_at_limit, self.src_near = [], {}, {}
             return
         descriptions = pfstats.rule_descriptions()
         hour = now - now % 3600
-        found = []
-        for node in pfstats.read_src_nodes():
-            rule = limited.get(node['rule'])
-            if rule is None:
-                continue
-            options = rule['options']
-            checks = []
-            if 'max-src-states' in options:
-                checks.append(('max-src-states', node['states'], int(options['max-src-states'])))
-            if 'max-src-conn' in options:
-                checks.append(('max-src-conn', node['connections'], int(options['max-src-conn'])))
-            if 'max-src-conn-rate' in options:
-                count, seconds = options['max-src-conn-rate'].split('/')
-                checks.append(('max-src-conn-rate', node['rate'], int(count)))
-            for kind, value, limit in checks:
-                if limit and value >= limit * 0.9:
-                    found.append({
+        best = {}
+        for rule in limited:
+            for node in self.nodes_of(rule, nodes):
+                for kind, value, limit in self.src_checks(rule['options'], node):
+                    if not limit or value < limit * 0.9:
+                        continue
+                    pct = round(value * 100.0 / limit, 1)
+                    key = (node['ip'], kind)
+                    if key in best and best[key]['pct'] >= pct:
+                        continue
+                    best[key] = {
                         'ip': node['ip'], 'lan': node['ip'] in self.lan, 'rule': rule['nr'],
                         'descr': descriptions.get(rule['label'], '') or rule['text'][:80], 'kind': kind,
-                        'value': value, 'limit': limit, 'pct': round(value * 100.0 / limit, 1),
+                        'tracking': rule['tracking'], 'value': value, 'limit': limit, 'pct': pct,
                         'at_limit': value >= limit, 'states': node['states'], 'connections': node['connections'],
                         'rate': '%s/%ss' % (node['rate'], node['rate_seconds']),
-                    })
-        found.sort(key=lambda f: (-f['pct'], f['ip']))
+                    }
+        found = sorted(best.values(), key=lambda f: (-f['pct'], f['ip']))
         self.src_limited = found[:200]
         at_limit = [f for f in found if f['at_limit']]
         self.src_at_limit = {f['ip']: f for f in at_limit}
+        self.src_near = {f['ip']: f for f in found if not f['at_limit'] and f['pct'] >= 95}
         self.con.executemany(
             """INSERT INTO srclimits (ip, nr, kind, descr, limit_value, peak, first_seen, last_seen, hits)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -648,6 +685,8 @@ class Collector:
         for f in at_limit:
             who = 'LAN host %s' % f['ip'] if f['lan'] else 'External source %s' % f['ip']
             hint = '' if f['lan'] else ' (the limit protects your hosts from it)'
+            if f['tracking'] == 'global':
+                hint += '; global source tracking: the count is shared by all rules with per source limits'
             self.alert(now, 'src_limit', 'high' if f['lan'] else 'medium',
                        'src_limit:%s:%d:%s:%d' % (f['ip'], f['rule'], f['kind'], hour), ip=f['ip'], reopen=False,
                        peer=str(f['rule']),
@@ -670,23 +709,174 @@ class Collector:
                                                  self._num(f['value']), f['limit'], f['rule'], f['descr'])
             for f in hits[:5])
 
-    def check_rules(self, now, all_rules):
-        """ rules with "max states" close to their limit """
+    def check_rules(self, now, all_rules, nodes):
+        """
+        Fill ratio of every limit a rule carries, taken from the rule itself:
+        max (states of the rule), max-src-nodes (sources of the rule) and, per source,
+        max-src-states / max-src-conn / max-src-conn-rate (busiest source shown).
+        """
         hour = now - now % 3600
+        descriptions = pfstats.rule_descriptions()
         rules = []
         for rule in all_rules:
-            if not rule['options']:
+            options = rule['options']
+            if not options:
                 continue
-            maximum = int(rule['options'].get('max', 0))
-            rule['usage'] = round(rule['states'] * 100.0 / maximum, 1) if maximum else None
-            rules.append(rule)
-            if maximum and rule['states'] >= maximum * 0.9:
-                self.alert(now, 'rule_limit', 'critical' if rule['states'] >= maximum else 'high',
-                           'rule_limit:%d:%d' % (rule['nr'], hour), reopen=False, peer=str(rule['nr']),
-                           detail='rule @%d holds %d of max %d states: %s'
-                                  % (rule['nr'], rule['states'], maximum, rule['text'][:120]))
-        rules.sort(key=lambda r: -(r['usage'] or 0))
-        self.rules = rules[:50]
+            metrics = []
+            if 'max' in options:
+                metrics.append({'kind': 'max', 'value': rule['states'], 'limit': int(options['max']), 'ip': ''})
+            sources = self.nodes_of(rule, nodes) if rule['tracking'] else []
+            if 'max-src-nodes' in options and rule['tracking'] == 'rule':
+                metrics.append({'kind': 'max-src-nodes', 'value': len(sources),
+                                'limit': int(options['max-src-nodes']), 'ip': ''})
+            over80 = set()
+            if sources:
+                per_kind = {}
+                for node in sources:
+                    for kind, value, limit in self.src_checks(options, node):
+                        if limit and value >= limit * 0.8:
+                            over80.add(node['ip'])
+                        if kind not in per_kind or value > per_kind[kind]['value']:
+                            per_kind[kind] = {'kind': kind, 'value': value, 'limit': limit, 'ip': node['ip']}
+                metrics.extend(per_kind[k] for k in ('max-src-states', 'max-src-conn', 'max-src-conn-rate')
+                               if k in per_kind)
+            for metric in metrics:
+                metric['pct'] = round(metric['value'] * 100.0 / metric['limit'], 1) if metric['limit'] else 0.0
+            usage = next((m['pct'] for m in metrics if m['kind'] == 'max'), None)
+            rules.append({
+                'nr': rule['nr'], 'label': rule['label'], 'text': rule['text'], 'options': options,
+                'descr': descriptions.get(rule['label'], ''), 'tracking': rule['tracking'], 'states': rule['states'],
+                'usage': usage, 'metrics': metrics, 'sources': len(sources), 'over80': len(over80),
+                'worst': max([m['pct'] for m in metrics] or [0.0]),
+            })
+            name = descriptions.get(rule['label'], '') or rule['text'][:100]
+            for metric in metrics:
+                if metric['kind'] in ('max', 'max-src-nodes') and metric['limit'] and metric['pct'] >= 90:
+                    what = 'states' if metric['kind'] == 'max' else 'source addresses'
+                    self.alert(now, 'rule_limit', 'critical' if metric['pct'] >= 100 else 'high',
+                               'rule_limit:%d:%s:%d' % (rule['nr'], metric['kind'], hour), reopen=False,
+                               peer=str(rule['nr']),
+                               detail='rule @%d (%s) holds %d of %s %d %s (%.0f%%)'
+                                      % (rule['nr'], name, metric['value'], metric['kind'], metric['limit'], what,
+                                         metric['pct']))
+        rules.sort(key=lambda r: (-r['worst'], r['nr']))
+        self.rules = rules[:100]
+        self.rules_full = [r for r in rules if r['usage'] is not None and r['usage'] >= 99]
+
+    #  traffic shaper (ipfw / dummynet)
+
+    def shaper_config(self):
+        try:
+            mtime = os.path.getmtime(shaper.CONFIG_XML)
+        except OSError:
+            return {'pipes': {}, 'queues': {}, 'rules': []}
+        if mtime != self.shaper_cfg_mtime:
+            self.shaper_cfg = shaper.read_config()
+            self.shaper_cfg_mtime = mtime
+        return self.shaper_cfg
+
+    def check_shaper(self, now):
+        """
+        Bandwidth limits of the shaper pipes / queues and how full they are, per flow (per IP when the
+        pipe or queue has a mask): throughput from byte counter deltas, drops from the drop counters.
+        """
+        pipes, queues = shaper.read_pipes(), shaper.read_queues()
+        if not pipes and not queues:
+            self.shaper, self.shaper_drops = {}, {}
+            return
+        config = self.shaper_config()
+        interval = float(now - self.shaper_last) if self.shaper_last else None
+        self.shaper_last = now
+        previous, current = self.shaper_prev, {}
+        bandwidth = dict((p['nr'], p['bandwidth']) for p in pipes)
+        hour = now - now % 3600
+        threshold = self.cfg['shaper_drop_pps']
+        flows, objects, drops_by_ip, hits = [], [], {}, []
+
+        def label(kind, nr, meta):
+            return '%s %d%s' % (kind, nr, ' "%s"' % meta['descr'] if meta.get('descr') else '')
+
+        for kind, items in (('pipe', pipes), ('queue', queues)):
+            for item in items:
+                meta = config['pipes' if kind == 'pipe' else 'queues'].get(item['nr'], {})
+                limit = item['bandwidth'] if kind == 'pipe' else bandwidth.get(item['pipe'], 0)
+                name = label(kind, item['nr'], meta)
+                total_bps = total_dps = 0.0
+                peak_util = 0.0
+                for flow in item['flows']:
+                    key = (kind, item['nr'], flow['src'], flow['dst'])
+                    current[key] = (flow['bytes'], flow['drops'])
+                    old = previous.get(key)
+                    if old is None or interval is None or flow['bytes'] < old[0] or not interval:
+                        continue      # first sighting: rate unknown until the next poll
+                    bps = (flow['bytes'] - old[0]) * 8 / interval
+                    dps = max(0, flow['drops'] - old[1]) / interval
+                    total_bps += bps
+                    total_dps += dps
+                    side = item['mask']
+                    if side == 'src':
+                        ip = flow['src']
+                    elif side == 'dst':
+                        ip = flow['dst']
+                    elif side == 'both':
+                        ip = flow['src'] if flow['src'] in self.lan else flow['dst']
+                    else:
+                        ip = ''         # shared pipe / queue: one flow for everybody
+                    # masked pipe: every flow gets the full bandwidth; queues share their pipe by weight
+                    util = round(bps * 100.0 / limit, 1) if limit and (kind == 'pipe' and side != 'none'
+                                                                       or kind == 'queue') else None
+                    peak_util = max(peak_util, util or 0)
+                    flows.append({'kind': kind, 'nr': item['nr'], 'name': name, 'ip': ip, 'lan': ip in self.lan,
+                                  'bps': round(bps), 'limit': limit, 'util': util, 'drops_ps': round(dps, 1),
+                                  'drops_total': flow['drops'], 'queued': flow['queued']})
+                    if ip and dps > 0:
+                        if ip not in drops_by_ip or dps > drops_by_ip[ip]['dps']:
+                            drops_by_ip[ip] = {'dps': dps, 'label': name}
+                        hits.append((ip, kind, item['nr'], meta.get('descr', ''), limit, int(bps), now, now,
+                                     int(round(dps * interval))))
+                    if ip and dps >= threshold:
+                        who = 'LAN host %s' % ip if ip in self.lan else 'Address %s' % ip
+                        per = 'per IP' if kind == 'pipe' else 'shared, weight %s' % item.get('weight')
+                        self.alert(now, 'shaper_drop', 'high' if ip in self.lan else 'medium',
+                                   'shaper_drop:%s:%s:%d:%d' % (ip, kind, item['nr'], hour), ip=ip, reopen=False,
+                                   peer='%s %d' % (kind, item['nr']),
+                                   detail='%s is rate limited by shaper %s (%s, %s): %s now, %s, dropping ~%.0f pkt/s'
+                                          % (who, name, self._bits(limit), per, self._bits(bps),
+                                             '%.0f%% of the limit' % util if util is not None else 'shared',
+                                             dps))
+                if item['mask'] == 'none' and kind == 'pipe' and limit:
+                    peak_util = round(total_bps * 100.0 / limit, 1)
+                    if total_dps >= threshold:
+                        self.alert(now, 'shaper_drop', 'medium', 'shaper_drop:pipe:%d:%d' % (item['nr'], hour),
+                                   reopen=False, peer='pipe %d' % item['nr'],
+                                   detail='shared shaper %s (%s for everyone in it) is full: %s now, dropping ~%.0f pkt/s'
+                                          % (name, self._bits(limit), self._bits(total_bps), total_dps))
+                objects.append({
+                    'kind': kind, 'nr': item['nr'], 'name': name, 'descr': meta.get('descr', ''),
+                    'limit': limit, 'mask': item['mask'], 'pipe': item.get('pipe'), 'weight': item.get('weight'),
+                    'flows': len(item['flows']), 'bps': round(total_bps), 'util': peak_util,
+                    'drops_ps': round(total_dps, 1),
+                    'rules': ['%s %s %s -> %s%s' % (r['interface'], r['direction'], r['source'], r['destination'],
+                                                    ' (%s)' % r['descr'] if r['descr'] else '')
+                              for r in meta.get('rules', []) if r['enabled']],
+                })
+        self.shaper_prev = current
+        flows.sort(key=lambda f: (-f['drops_ps'], -(f['util'] or 0), -f['bps']))
+        self.shaper = {'objects': objects, 'flows': flows[:300], 'interval': interval}
+        self.shaper_drops = drops_by_ip
+        self.con.executemany(
+            """INSERT INTO shaperhits (ip, kind, nr, descr, limit_bps, peak_bps, first_seen, last_seen, drops)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (ip, kind, nr) DO UPDATE SET descr = excluded.descr, limit_bps = excluded.limit_bps,
+                   peak_bps = MAX(peak_bps, excluded.peak_bps), last_seen = excluded.last_seen,
+                   drops = drops + excluded.drops""", hits)
+
+    @staticmethod
+    def _bits(bps):
+        for unit, size in (('Gbit/s', 1e9), ('Mbit/s', 1e6), ('Kbit/s', 1e3)):
+            if bps >= size:
+                return '%.1f %s' % (bps / size, unit)
+        return '%d bit/s' % bps
 
     def check_tables(self, now):
         """ LAN hosts listed in overload / lockout / CrowdSec tables """
@@ -743,7 +933,7 @@ class Collector:
                          'max_packets': self.cfg['sample_packets'], 'last': self.sample_info,
                          'labels': {d: self.iface_labels.get(d, '') for d in self.sample_devices},
                          'reason_tables': sorted(set('<%s> @%d' % (r['table'], r['nr']) for r in self.reason_tables))},
-            'rule_activity': self.rule_activity, 'src_limited': self.src_limited,
+            'rule_activity': self.rule_activity, 'src_limited': self.src_limited, 'shaper': self.shaper,
         })
 
     def read_blocked(self, now, day, lateral):
@@ -915,7 +1105,8 @@ class Collector:
                                   ('hosts', 'last_seen'), ('services', 'last_probe'), ('lateral', 'last_seen'),
                                   ('l2bind', 'last_seen'), ('alerts', 'last_seen'), ('ts_pf', 'ts'),
                                   ('tablehits', 'last_seen'), ('blocked', 'last_seen'), ('ts_blocked', 'ts'),
-                                  ('ts_rules', 'ts'), ('srclimits', 'last_seen'), ('blocked_reasons', 'last_seen')):
+                                  ('ts_rules', 'ts'), ('srclimits', 'last_seen'), ('blocked_reasons', 'last_seen'),
+                                  ('shaperhits', 'last_seen')):
                 self.con.execute('DELETE FROM %s WHERE %s < ?' % (table, column), (cutoff,))
         self.pruned = now
 

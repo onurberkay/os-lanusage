@@ -44,9 +44,11 @@ OPNsense'teki adıyla yazar, ör. `igb0 (WAN)`.
 
 1. Block kurallarının kullandığı pf tabloları (CrowdSec, virusprot, bogons, alias'lar): `<tablo> rule @N açıklama`
 2. Kaynak başına limit (max-src-states / max-src-conn / max-src-conn-rate): `... limit rule @N açıklama`
-3. O anda dolu state tablosu (pf `memory` sayacı artmışsa)
-4. Dışarıdan gelen özel/bogon kaynak adresi
-5. Hiçbiri değilse: `no pass rule (default deny or a block rule)`. Hangi block kuralının durdurduğu log olmadan bilinemez;
+3. Shaper o IP için paket düşürüyorsa: `shaper pipe N "açıklama" rate limit drops`
+4. Kaynak limite %95+ yakınsa: `near ... limit rule @N (likely)`; bir kuralın `max` sınırı doluysa ve pf sayacı arttıysa: `rule @N max states full (likely)`
+5. O anda dolu state tablosu (pf `memory` sayacı artmışsa)
+6. Dışarıdan gelen özel/bogon kaynak adresi
+7. Hiçbiri değilse: `no pass rule (default deny or a block rule)`. Hangi block kuralının durdurduğu log olmadan bilinemez;
    kesin sayılar Block rules tablosundadır.
 
 Blocked sekmesinde sebep dağılımı grafiği, host başına ilk 3 sebep ve her denemenin sebebi gösterilir. Uyarılarda da "why:" olarak yazar.
@@ -74,6 +76,36 @@ Routed + NAT kurulumunda WAN'da örneklenen NAT'lı adresler LAN ağına girmedi
 | Connection rate (host) | high | Bir LAN host'u saniyede ≥ 300 yeni bağlantı açtığında / aldığında |
 | LAN host in block table | virusprot/sshlockout: high, CrowdSec: critical | Bir LAN IP'si izlenen bir pf tablosuna eklendiğinde |
 | Source at rule limit | LAN kaynağı: high, dış kaynak: medium | Bir kaynak IP, kuralındaki `max-src-states`, `max-src-conn` ya da `max-src-conn-rate` sınırına ulaştığında. `pfctl -sS -v` (source tracking) okunur; uyarıda IP, limit (değer/sınır) ve kural (numara + açıklama) yazar. `src-limit` / `max-src-*` sayaç uyarıları da artık tahmin yerine o an limitte olan kaynakları yazar. %90'ı geçen kaynaklar States / Limits sekmesinde listelenir. |
+
+### Kural limitleri ve doluluk
+
+Her kuraldaki limitler `pfctl -vvsr` çıktısından otomatik okunur ve doluluk oranı hesaplanır:
+
+| Limit | Neye göre | Doluluk |
+|---|---|---|
+| `max` | Kuralın toplam state'i | state / max |
+| `max-src-nodes` | Kuraldaki kaynak adres sayısı (yalnız `source-track rule`) | kaynak sayısı / limit |
+| `max-src-states` | Kaynak başına state | en yoğun kaynak / limit |
+| `max-src-conn` | Kaynak başına kurulmuş TCP bağlantısı | en yoğun kaynak / limit |
+| `max-src-conn-rate` | Kaynak başına yeni bağlantı hızı | en yoğun kaynak / limit |
+
+OPNsense bu limitleri `source-track` yazmadan oluşturur. Bu durumda pf **global** kaynak takibi kullanır: her adres için
+tek sayaç vardır, kaynak başına limiti olan tüm kurallar bunu paylaşır ve `pfctl -sS` kural numarası yazmaz. Eklenti
+bu düğümleri limiti olan her kuralla karşılaştırır ve en sıkı sınırı raporlar. `source-track rule` olan kurallar
+kendi düğümleriyle eşleşir. Tablo, %80'i geçen kaynak sayısını da gösterir.
+
+### Traffic shaper
+
+`ipfw pipe show` / `ipfw queue show` okunur. Pipe ve queue açıklamaları, maskeler ve hangi shaper kuralının nereye
+gittiği **Firewall → Shaper** ayarlarından alınır.
+
+- **Pipe:** bant genişliği limiti. Maske varsa (src-ip / dst-ip) her IP bu limitin tamamını alır; maske yoksa limit
+  herkes arasında paylaşılır.
+- **Queue:** bağlı olduğu pipe'ı ağırlığına göre paylaşır.
+- **Ölçülenler:** IP başına anlık hız (bayt sayacı farkından), limite göre doluluk, saniyede düşürülen paket. Düşen paket,
+  limitin dolduğunu gösterir.
+- **Uyarı:** "Shaper limit reached" (varsayılan ≥ 5 pkt/s düşüş). Engellenen trafikte sebep olarak da
+  `shaper pipe N "açıklama" rate limit drops` yazılır.
 
 ### Transparent bridge modu
 
@@ -159,6 +191,7 @@ Web GUI (Volt + JS SVG grafikler) ──> /api/lanusage/stats/* (PHP) ──> co
 | `.../lib/detect.py` | Servis tespiti |
 | `.../lib/l2.py`, `.../lib/filterlog.py` | ARP/NDP tablosu ve pasif ARP/ND dinleme (bridge), firewall log'undan engellenen paketleri artımlı okuma |
 | `.../lib/sampler.py` | Sınırlı süre/paketle bağlantı denemesi örnekleme (engellenen trafik için) |
+| `.../lib/shaper.py` | `ipfw pipe/queue show` ve Firewall → Shaper ayarlarını okuma |
 | `.../lib/pfstats.py` | `pfctl -vsi / -sm / -vvsr / -sT` okuma: sayaçlar, limitler, kural limitleri, tablolar |
 | `.../query.py`, `.../probe.py` | configd tarafından çağrılan JSON okuma / elle test |
 | `src/opnsense/mvc/...` | Model, ayar formu, menü, ACL, API ve görünümler |

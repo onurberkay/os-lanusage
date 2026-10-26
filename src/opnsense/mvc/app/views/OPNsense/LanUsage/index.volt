@@ -262,13 +262,14 @@ $(function () {
         blocked_out: 'Blocked outbound (host)',
         blocked_in: 'Blocked attack (host)',
         rule_blocking: 'Block rule busy',
-        src_limit: 'Source at rule limit'
+        src_limit: 'Source at rule limit',
+        shaper_drop: 'Shaper limit reached'
     };
     /* block reasons: table hit / limit / state table / bogon / no pass rule */
     function reasonClass(reason) {
         reason = String(reason || '');
         if (reason.charAt(0) === '<') return 'lan';
-        if (reason.indexOf('limit') > -1 || reason.indexOf('state table') > -1) return 'warn';
+        if (reason.indexOf('limit') > -1 || reason.indexOf('state') > -1 || reason.indexOf('shaper') > -1) return 'warn';
         if (reason.indexOf('bogon') > -1) return 'out';
         return '';
     }
@@ -280,6 +281,13 @@ $(function () {
             return '<span class="lu-badge ' + reasonClass(w.reason) + '" title="' + esc(w.reason) + '">' +
                    esc(w.pct) + '% ' + esc(String(w.reason).length > 34 ? String(w.reason).slice(0, 33) + '…' : w.reason) + '</span>';
         }).join(' ');
+    }
+    function fmtBits(bps) {
+        bps = Number(bps) || 0;
+        if (bps >= 1e9) return (bps / 1e9).toFixed(2) + ' Gbit/s';
+        if (bps >= 1e6) return (bps / 1e6).toFixed(1) + ' Mbit/s';
+        if (bps >= 1e3) return (bps / 1e3).toFixed(0) + ' Kbit/s';
+        return Math.round(bps) + ' bit/s';
     }
     function devLabel(dev, labels) {
         return labels && labels[dev] ? dev + ' (' + labels[dev] + ')' : dev;
@@ -494,19 +502,76 @@ $(function () {
         ], 'increase', function (r) { return r.watched && r.increase > 0 ? 'lu-row-bad' : ''; }),
 
         rules: makeTable('lu-rules', [
-            {key: 'nr', label: 'Rule', num: true, html: function (r) { return '@' + esc(r.nr); }},
-            {key: 'states', label: 'States', cls: 'num', num: true, html: function (r) { return fmtNum(r.states); }},
-            {key: 'usage', label: 'of max', num: true, cls: 'nowrap',
-             html: function (r) { return r.usage === null ? '<span class="text-muted">no max</span>' : pctBar(r.usage); }},
-            {key: 'options', label: 'Limits', nosort: true,
-             text: function (r) { return Object.keys(r.options).map(function (k) { return k + ' ' + r.options[k]; }).join(' '); },
+            {key: 'nr', label: 'Rule', num: true, text: function (r) { return '@' + r.nr + ' ' + r.descr + ' ' + r.text; },
              html: function (r) {
-                 return Object.keys(r.options).map(function (k) {
-                     return '<span class="lu-badge">' + esc(k + ' ' + r.options[k]) + '</span>';
-                 }).join('');
+                 return '@' + esc(r.nr) + ' ' + (r.descr ? '<b>' + esc(r.descr) + '</b>' : '') +
+                        '<div class="text-muted" style="font-size:11px;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
+                        esc(r.text) + '">' + esc(r.text) + '</div>';
              }},
-            {key: 'text', label: 'Rule', cls: 'banner', html: function (r) { return '<span title="' + esc(r.text) + '">' + esc(r.text) + '</span>'; }}
-        ], 'usage', function (r) { return r.usage >= 100 ? 'lu-row-bad' : (r.usage >= 90 ? 'lu-row-warn' : ''); }),
+            {key: 'tracking', label: 'Source tracking',
+             html: function (r) {
+                 return r.tracking ? '<span class="lu-badge" title="' + (r.tracking === 'global'
+                     ? 'one counter per address, shared by all rules with per source limits' : 'counted per rule') + '">' +
+                     esc(r.tracking) + '</span>' : '<span class="text-muted">-</span>';
+             }},
+            {key: 'worst', label: 'Fill (each limit of the rule)', num: true, cls: 'nowrap',
+             html: function (r) {
+                 return (r.metrics || []).map(function (m) {
+                     return '<div style="white-space:nowrap"><span style="display:inline-block;min-width:120px">' + esc(m.kind) +
+                            '</span>' + pctBar(m.pct) + ' <span class="text-muted">' + esc(fmtNum(m.value)) + ' / ' +
+                            esc(fmtNum(m.limit)) + (m.ip ? ' · ' + esc(m.ip) : '') + '</span></div>';
+                 }).join('') || '<span class="text-muted">-</span>';
+             }},
+            {key: 'sources', label: 'Sources', cls: 'num', num: true},
+            {key: 'over80', label: 'Sources ≥ 80%', cls: 'num', num: true,
+             html: function (r) { return r.over80 ? '<span class="lu-badge warn">' + esc(r.over80) + '</span>' : '0'; }}
+        ], 'worst', function (r) { return r.worst >= 100 ? 'lu-row-bad' : (r.worst >= 90 ? 'lu-row-warn' : ''); }),
+
+        shaperObjects: makeTable('lu-shaper-objects', [
+            {key: 'name', label: 'Pipe / queue', text: function (r) { return r.name + ' ' + r.rules.join(' '); },
+             html: function (r) {
+                 return '<b>' + esc(r.name) + '</b>' + (r.kind === 'queue' && r.pipe ? ' <span class="text-muted">in pipe ' + esc(r.pipe) +
+                        ', weight ' + esc(r.weight) + '</span>' : '') +
+                        r.rules.map(function (x) { return '<div class="text-muted" style="font-size:11px">' + esc(x) + '</div>'; }).join('');
+             }},
+            {key: 'limit', label: 'Limit', num: true, cls: 'nowrap',
+             html: function (r) { return r.limit ? fmtBits(r.limit) : '<span class="text-muted">unlimited</span>'; }},
+            {key: 'mask', label: 'Applies', html: function (r) {
+                 return r.mask === 'src' ? 'per source IP' : r.mask === 'dst' ? 'per destination IP' :
+                        r.mask === 'both' ? 'per address pair' : 'shared';
+             }},
+            {key: 'flows', label: 'Active flows', cls: 'num', num: true},
+            {key: 'bps', label: 'Now', cls: 'num', num: true, html: function (r) { return fmtBits(r.bps); }},
+            {key: 'util', label: 'Fill', num: true, cls: 'nowrap',
+             html: function (r) { return r.limit ? pctBar(r.util) + (r.mask !== 'none' ? ' <span class="text-muted">busiest</span>' : '') : ''; }},
+            {key: 'drops_ps', label: 'Drops/s', cls: 'num', num: true,
+             html: function (r) { return r.drops_ps ? '<b>' + esc(r.drops_ps) + '</b>' : '0'; }}
+        ], 'util', function (r) { return r.drops_ps > 0 ? 'lu-row-bad' : (r.util >= 90 ? 'lu-row-warn' : ''); }),
+
+        shaperFlows: makeTable('lu-shaper-flows', [
+            {key: 'ip', label: 'Address', sortValue: function (r) { return ipKey(r.ip); },
+             html: function (r) { return r.ip ? (r.lan ? ipLink(r.ip) : esc(r.ip)) : '<span class="text-muted">shared</span>'; }},
+            {key: 'name', label: 'Pipe / queue'},
+            {key: 'bps', label: 'Now', cls: 'num', num: true, html: function (r) { return fmtBits(r.bps); }},
+            {key: 'limit', label: 'Limit', cls: 'num', num: true, html: function (r) { return r.limit ? fmtBits(r.limit) : ''; }},
+            {key: 'util', label: 'Fill', num: true, cls: 'nowrap',
+             sortValue: function (r) { return r.util === null ? -1 : r.util; },
+             html: function (r) { return r.util === null ? '<span class="text-muted">shared</span>' : pctBar(r.util); }},
+            {key: 'drops_ps', label: 'Drops/s', cls: 'num', num: true,
+             html: function (r) { return r.drops_ps ? '<b>' + esc(r.drops_ps) + '</b>' : '0'; }},
+            {key: 'queued', label: 'Queued', cls: 'num', num: true}
+        ], 'drops_ps', function (r) { return r.drops_ps > 0 ? 'lu-row-bad' : (r.util >= 90 ? 'lu-row-warn' : ''); }),
+
+        shaperHits: makeTable('lu-shaper-hits', [
+            {key: 'ip', label: 'Address', sortValue: function (r) { return ipKey(r.ip); },
+             html: function (r) { return r.lan ? ipLink(r.ip) : esc(r.ip); }},
+            {key: 'nr', label: 'Pipe / queue', num: true,
+             html: function (r) { return esc(r.kind + ' ' + r.nr) + (r.descr ? ' <b>' + esc(r.descr) + '</b>' : ''); }},
+            {key: 'limit', label: 'Limit', cls: 'num', num: true, html: function (r) { return r.limit ? fmtBits(r.limit) : ''; }},
+            {key: 'peak_bps', label: 'Peak', cls: 'num', num: true, html: function (r) { return fmtBits(r.peak_bps); }},
+            {key: 'drops', label: 'Dropped packets', cls: 'num', num: true, html: function (r) { return fmtNum(r.drops); }},
+            {key: 'last_seen', label: 'Last drop', num: true, cls: 'nowrap', html: function (r) { return ago(r.last_seen); }}
+        ], 'drops'),
 
         tablehits: makeTable('lu-tablehits', [
             {key: 'table', label: 'pf table'},
@@ -760,6 +825,11 @@ $(function () {
         tables.srcLimits.setRows(d.src_limits || []);
         tables.counters.setRows(d.counters);
         tables.rules.setRows(d.rules);
+        const sh = d.shaper || {};
+        $('#lu-shaper-none').toggle(!(sh.objects || []).length);
+        tables.shaperObjects.setRows(sh.objects || []);
+        tables.shaperFlows.setRows(sh.flows || []);
+        tables.shaperHits.setRows(d.shaper_hits || []);
         tables.tablehits.setRows(d.tablehits);
     }
 
@@ -1151,7 +1221,40 @@ $(function () {
             </div>
         </div>
         <div class="lu-pane" id="lu-rules">
-            <h4 style="font-size:13px;font-weight:600">{{ lang._('Rules with connection limits') }}</h4>
+            <h4 style="font-size:13px;font-weight:600">{{ lang._('Rule limits and how full they are') }}</h4>
+            <div class="lu-note">{{ lang._('Read from every firewall rule that carries a limit: max (states of the rule), max-src-nodes (source addresses of the rule), and per source max-src-states, max-src-conn, max-src-conn-rate (busiest source shown). With global source tracking, the default for OPNsense rules, one counter per address is shared by all rules with per source limits.') }}</div>
+            <div class="lu-table-tools">
+                <input type="text" class="form-control lu-search" placeholder="{{ lang._('Search...') }}"/>
+                <span class="lu-count"></span>
+            </div>
+            <div class="lu-table-wrap" style="max-height:420px">
+                <table class="table table-condensed table-hover lu-table"><thead><tr></tr></thead><tbody></tbody></table>
+            </div>
+        </div>
+        <div class="lu-pane" id="lu-shaper-objects">
+            <h4 style="font-size:13px;font-weight:600">{{ lang._('Traffic shaper: pipes and queues') }}</h4>
+            <div class="lu-note">{{ lang._('Limits, masks, descriptions and the shaper rules feeding them come from Firewall: Shaper; throughput and drops from the ipfw counters. A per IP pipe gives every address the full bandwidth; a shared pipe splits it; queues share their pipe by weight. Drops mean the limit is reached.') }}</div>
+            <div class="text-muted" id="lu-shaper-none" style="display:none">{{ lang._('No shaper pipes found (shaper not used, or ipfw not loaded).') }}</div>
+            <div class="lu-table-tools">
+                <input type="text" class="form-control lu-search" placeholder="{{ lang._('Search...') }}"/>
+                <span class="lu-count"></span>
+            </div>
+            <div class="lu-table-wrap" style="max-height:360px">
+                <table class="table table-condensed table-hover lu-table"><thead><tr></tr></thead><tbody></tbody></table>
+            </div>
+        </div>
+        <div class="lu-pane" id="lu-shaper-flows">
+            <h4 style="font-size:13px;font-weight:600">{{ lang._('Traffic shaper: addresses now') }}</h4>
+            <div class="lu-table-tools">
+                <input type="text" class="form-control lu-search" placeholder="{{ lang._('Search...') }}"/>
+                <span class="lu-count"></span>
+            </div>
+            <div class="lu-table-wrap" style="max-height:360px">
+                <table class="table table-condensed table-hover lu-table"><thead><tr></tr></thead><tbody></tbody></table>
+            </div>
+        </div>
+        <div class="lu-pane" id="lu-shaper-hits">
+            <h4 style="font-size:13px;font-weight:600">{{ lang._('Traffic shaper: addresses that hit their limit (dropped packets) in the period') }}</h4>
             <div class="lu-table-tools">
                 <input type="text" class="form-control lu-search" placeholder="{{ lang._('Search...') }}"/>
                 <span class="lu-count"></span>

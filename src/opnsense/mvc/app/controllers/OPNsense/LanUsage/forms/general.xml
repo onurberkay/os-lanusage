@@ -223,6 +223,12 @@
         <help>Alert when the pf state table is this full (critical at 95%). Increases of pf limit counters (memory, state-limit, src-limit, max-src-conn(-rate), overload, synflood, NAT map failures) and rules close to their "max states" always alert.</help>
     </field>
     <field>
+        <id>general.shaper_drop_pps</id>
+        <label>Shaper drop alert (pkt/s)</label>
+        <type>text</type>
+        <help>Alert when the traffic shaper drops at least this many packets per second for one address (per IP pipe / queue) or for a shared pipe, i.e. the bandwidth limit is reached. Limits, masks and descriptions are read from Firewall: Shaper.</help>
+    </field>
+    <field>
         <id>general.watch_tables</id>
         <label>Watch pf tables</label>
         <type>text</type>
