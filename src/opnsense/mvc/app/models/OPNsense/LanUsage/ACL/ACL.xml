@@ -1,9 +1,0 @@
-<acl>
-    <page-reporting-lanusage>
-        <name>Reporting: LAN Usage</name>
-        <patterns>
-            <pattern>ui/lanusage/*</pattern>
-            <pattern>api/lanusage/*</pattern>
-        </patterns>
-    </page-reporting-lanusage>
-</acl>

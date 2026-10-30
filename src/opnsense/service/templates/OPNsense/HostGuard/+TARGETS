@@ -1,0 +1,2 @@
+hostguard.conf:/usr/local/etc/hostguard/hostguard.conf
+rc.conf.d:/etc/rc.conf.d/hostguard

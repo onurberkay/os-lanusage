@@ -1,0 +1,248 @@
+<model>
+    <mount>//OPNsense/hostguard/general</mount>
+    <description>HostGuard</description>
+    <version>1.7.0</version>
+    <items>
+        <enabled type="BooleanField">
+            <Default>0</Default>
+            <Required>Y</Required>
+        </enabled>
+        <interfaces type="InterfaceField">
+            <Multiple>Y</Multiple>
+            <Default>lan</Default>
+        </interfaces>
+        <networks type="NetworkField">
+            <AsList>Y</AsList>
+            <WildcardEnabled>N</WildcardEnabled>
+        </networks>
+        <ignore_self type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </ignore_self>
+        <answered_only type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </answered_only>
+        <track_remote type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </track_remote>
+        <poll_interval type="IntegerField">
+            <Default>30</Default>
+            <MinimumValue>5</MinimumValue>
+            <MaximumValue>600</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 5 and 600 seconds.</ValidationMessage>
+        </poll_interval>
+        <retention_days type="IntegerField">
+            <Default>30</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>365</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 1 and 365 days.</ValidationMessage>
+        </retention_days>
+        <probe_enabled type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </probe_enabled>
+        <probe_interval type="IntegerField">
+            <Default>24</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>720</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 1 and 720 hours.</ValidationMessage>
+        </probe_interval>
+        <probe_timeout type="IntegerField">
+            <Default>4</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>30</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 1 and 30 seconds.</ValidationMessage>
+        </probe_timeout>
+        <probe_max type="IntegerField">
+            <Default>20</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>500</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 1 and 500.</ValidationMessage>
+        </probe_max>
+        <probe_exclude type="TextField">
+            <Mask>/^([0-9]{1,5}(-[0-9]{1,5})?)?(,[0-9]{1,5}(-[0-9]{1,5})?)*$/</Mask>
+            <ValidationMessage>Enter ports or ranges separated by commas, e.g. 25,8000-8100.</ValidationMessage>
+        </probe_exclude>
+        <use_nmap type="BooleanField">
+            <Default>0</Default>
+            <Required>Y</Required>
+        </use_nmap>
+        <lateral_alerts type="OptionField">
+            <Default>all</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <all>Every new LAN to LAN connection</all>
+                <sensitive>Only sensitive ports (SSH, RDP, SMB, databases, ...)</sensitive>
+                <off>Off (record only)</off>
+            </OptionValues>
+        </lateral_alerts>
+        <lateral_trusted type="NetworkField">
+            <AsList>Y</AsList>
+            <WildcardEnabled>N</WildcardEnabled>
+        </lateral_trusted>
+        <lateral_blocked type="BooleanField">
+            <Default>0</Default>
+            <Required>Y</Required>
+        </lateral_blocked>
+        <sample_enabled type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </sample_enabled>
+        <sample_interfaces type="InterfaceField">
+            <Multiple>Y</Multiple>
+        </sample_interfaces>
+        <sample_seconds type="IntegerField">
+            <Default>5</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>20</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 1 and 20 seconds.</ValidationMessage>
+        </sample_seconds>
+        <sample_packets type="IntegerField">
+            <Default>20000</Default>
+            <MinimumValue>100</MinimumValue>
+            <MaximumValue>500000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 100 and 500000.</ValidationMessage>
+        </sample_packets>
+        <blocked_out_pps type="IntegerField">
+            <Default>20</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>100000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 1.</ValidationMessage>
+        </blocked_out_pps>
+        <blocked_in_pps type="IntegerField">
+            <Default>500</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>100000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 1.</ValidationMessage>
+        </blocked_in_pps>
+        <rule_block_pps type="IntegerField">
+            <Default>2000</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>100000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 1.</ValidationMessage>
+        </rule_block_pps>
+        <scan_hosts type="IntegerField">
+            <Default>10</Default>
+            <MinimumValue>2</MinimumValue>
+            <MaximumValue>10000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 2 and 10000.</ValidationMessage>
+        </scan_hosts>
+        <scan_ports type="IntegerField">
+            <Default>20</Default>
+            <MinimumValue>2</MinimumValue>
+            <MaximumValue>65535</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 2 and 65535.</ValidationMessage>
+        </scan_ports>
+        <l2_enabled type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </l2_enabled>
+        <l2_window type="IntegerField">
+            <Default>24</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>720</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value between 1 and 720 hours.</ValidationMessage>
+        </l2_window>
+        <l2_ignore_macs type="TextField">
+            <Mask>/^([0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5})?(,[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5})*$/</Mask>
+            <ValidationMessage>Enter MAC addresses separated by commas, e.g. 52:54:00:12:34:56.</ValidationMessage>
+        </l2_ignore_macs>
+        <l2_source type="OptionField">
+            <Default>both</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <both>ARP / NDP table and passive listening</both>
+                <sniff>Passive listening only (transparent bridge)</sniff>
+                <table>ARP / NDP table only (routed firewall)</table>
+            </OptionValues>
+        </l2_source>
+        <host_state_limit type="IntegerField">
+            <Default>10000</Default>
+            <MinimumValue>10</MinimumValue>
+            <MaximumValue>100000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 10.</ValidationMessage>
+        </host_state_limit>
+        <host_rate_limit type="IntegerField">
+            <Default>300</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>10000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 1.</ValidationMessage>
+        </host_rate_limit>
+        <state_warn_pct type="IntegerField">
+            <Default>80</Default>
+            <MinimumValue>10</MinimumValue>
+            <MaximumValue>100</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a percentage between 10 and 100.</ValidationMessage>
+        </state_warn_pct>
+        <shaper_drop_pps type="IntegerField">
+            <Default>5</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>100000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 1.</ValidationMessage>
+        </shaper_drop_pps>
+        <attack_pps type="IntegerField">
+            <Default>50</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>100000000</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose a value of at least 1.</ValidationMessage>
+        </attack_pps>
+        <ids_enabled type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </ids_enabled>
+        <crowdsec_enabled type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </crowdsec_enabled>
+        <watch_tables type="TextField">
+            <Default>virusprot,sshlockout,crowdsec</Default>
+            <Mask>/^[A-Za-z0-9_.,-]*$/</Mask>
+            <ValidationMessage>Enter table names (or parts of them) separated by commas.</ValidationMessage>
+        </watch_tables>
+        <ipdata_enabled type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </ipdata_enabled>
+        <hosting_asns type="TextField">
+            <Mask>/^(\s*(AS|as)?[0-9]{1,10}\s*)?(,\s*(AS|as)?[0-9]{1,10}\s*)*$/</Mask>
+            <ValidationMessage>Enter AS numbers separated by commas, e.g. AS16276,AS24940.</ValidationMessage>
+        </hosting_asns>
+        <auto_block_level type="OptionField">
+            <Default>0</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <off value="0">Off</off>
+                <l1 value="1">Level 1: certain (scans, Spamhaus ASN-DROP)</l1>
+                <l2 value="2">Level 1 + 2: likely (brute force, Suricata severity 1)</l2>
+                <l3 value="3">Level 1 + 2 + 3: possible (flood sources, Suricata severity 2, rule limits)</l3>
+            </OptionValues>
+        </auto_block_level>
+        <auto_block_hours type="IntegerField">
+            <Default>24</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>8784</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose between 1 and 8784 hours.</ValidationMessage>
+        </auto_block_hours>
+    </items>
+</model>

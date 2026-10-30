@@ -1,0 +1,85 @@
+# os-lanusage is the earlier name of this plugin: stop it and move its database (its settings are taken
+# over by the model migration M1_7_0). Also run by install.sh.
+OLD_RC=/usr/local/etc/rc.d/lanusage
+OLD_DB=/var/db/lanusage/lanusage.db
+NEW_DB=/var/db/hostguard/hostguard.db
+if [ -e "${OLD_RC}" ] || [ -e /usr/local/etc/inc/plugins.inc.d/lanusage.inc ] ||
+   { [ -f "${OLD_DB}" ] && [ ! -f "${NEW_DB}" ]; }; then
+	echo "Migrating from os-lanusage"
+	# the model migration ran before this script and always exits 0: look for the section itself
+	if grep -q '<lanusage' /conf/config.xml && ! grep -q '<hostguard' /conf/config.xml; then
+		echo "!! the os-lanusage settings were not taken over: set them under Reporting > HostGuard > Settings"
+	fi
+	if [ -x "${OLD_RC}" ]; then
+		"${OLD_RC}" onestop || true
+	elif [ -f /var/run/lanusage.pid ]; then
+		# the old package was removed first (e.g. as a conflict) without stopping its collector
+		# -L: only while daemon(8) holds it locked, a stale file may name another process by now
+		pkill -L -F /var/run/lanusage.pid || true
+	fi
+	# the database is moved below: never from under a collector still writing it. Its daemon(8)
+	# supervisor would start it again, so that goes first
+	for pid in $(pgrep -f 'OPNsense/LanUsage/collector.py'); do
+		parent="$(ps -o ppid= -p "${pid}" | tr -d ' ')"
+		if [ -n "${parent}" ] && [ "${parent}" != "1" ] && ps -o comm= -p "${parent}" | grep -qx daemon; then
+			kill "${parent}" || true
+		fi
+	done
+	# it stops after its current poll (up to a minute on a large state table), then it is killed
+	i=0
+	while [ "${i}" -lt 60 ] && pgrep -f 'OPNsense/LanUsage/collector.py' > /dev/null; do
+		pkill -f 'OPNsense/LanUsage/collector.py' || true
+		sleep 1
+		i=$((i + 1))
+	done
+	if pgrep -f 'OPNsense/LanUsage/collector.py' > /dev/null; then
+		pkill -KILL -f 'OPNsense/LanUsage/collector.py' || true
+		sleep 1
+	fi
+	# not started again at boot: M1_7_0 also turned it off in config.xml, for a package that stays installed
+	# (its template is reloaded at boot)
+	rm -f /etc/rc.conf.d/lanusage
+	mkdir -p /var/db/hostguard
+	if [ -f "${OLD_DB}" ] && [ ! -f "${NEW_DB}" ]; then
+		echo "Moving the database to /var/db/hostguard"
+		for ext in "" -wal -shm; do
+			if [ -f "${OLD_DB}${ext}" ]; then
+				mv "${OLD_DB}${ext}" "${NEW_DB}${ext}"
+			fi
+		done
+		rm -rf /var/db/lanusage
+	elif [ -f "${OLD_DB}" ]; then
+		echo "Both databases exist: the old one is kept, not merged, at ${OLD_DB}"
+	fi
+	if [ -e /usr/local/opnsense/version/lanusage ]; then
+		# a registered package: its files are pkg's, removing them here would break its records
+		# (install.sh removes it right after this script)
+		if [ -z "${HOSTGUARD_INSTALL_SH}" ]; then
+			echo "The os-lanusage package is still installed: remove it under System > Firmware > Plugins"
+			echo "(or 'configctl firmware remove os-lanusage'), so that a plugin sync does not install it again"
+		fi
+	else
+		# pkg may have removed it already (a conflict): it can still be in the plugins list of config.xml,
+		# which a plugin sync would install again
+		if [ -f /usr/local/opnsense/scripts/firmware/register.php ]; then
+			for old in os-lanusage os-lanusage-devel; do
+				/usr/local/bin/php /usr/local/opnsense/scripts/firmware/register.php remove "${old}" > /dev/null 2>&1 || true
+			done
+		fi
+		rm -rf /usr/local/opnsense/scripts/OPNsense/LanUsage \
+		       /usr/local/opnsense/mvc/app/controllers/OPNsense/LanUsage \
+		       /usr/local/opnsense/mvc/app/models/OPNsense/LanUsage \
+		       /usr/local/opnsense/mvc/app/views/OPNsense/LanUsage \
+		       /usr/local/opnsense/service/templates/OPNsense/LanUsage \
+		       /usr/local/opnsense/service/conf/actions.d/actions_lanusage.conf \
+		       /usr/local/opnsense/www/js/lanusage.charts.js \
+		       /usr/local/etc/inc/plugins.inc.d/lanusage.inc \
+		       "${OLD_RC}" /usr/local/etc/lanusage
+	fi
+fi
+# (re)start the collector when enabled: an upgrade stopped it (+PRE_DEINSTALL) or left the old code running,
+# os-lanusage settings taken over may enable it. install.sh restarts it itself, after its template reload
+if [ -z "${HOSTGUARD_INSTALL_SH}" ] && grep -q 'hostguard_enable="YES"' /etc/rc.conf.d/hostguard 2>/dev/null; then
+	/usr/local/etc/rc.d/hostguard onestop > /dev/null || true
+	/usr/local/etc/rc.d/hostguard start || true
+fi

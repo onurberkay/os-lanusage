@@ -1,0 +1,13 @@
+<menu>
+    <Reporting>
+        <HostGuard VisibleName="HostGuard" cssClass="fa fa-sitemap fa-fw" order="45">
+            <Dashboard url="/ui/hostguard/"/>
+            <Alerts url="/ui/hostguard/#alerts"/>
+            <Attacks VisibleName="Attacks" url="/ui/hostguard/#attacks"/>
+            <Conditions VisibleName="Block conditions" url="/ui/hostguard/#conditions"/>
+            <Blocked VisibleName="Blocked traffic" url="/ui/hostguard/#blocked"/>
+            <Limits VisibleName="States / Limits" url="/ui/hostguard/#limits"/>
+            <Settings url="/ui/hostguard/settings"/>
+        </HostGuard>
+    </Reporting>
+</menu>

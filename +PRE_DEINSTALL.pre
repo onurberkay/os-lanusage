@@ -1,0 +1,5 @@
+# the collector runs from memory: stop it while its rc script is still there (it would otherwise keep
+# writing the database and filling <virusprot> until the next reboot)
+if [ -x /usr/local/etc/rc.d/hostguard ]; then
+	/usr/local/etc/rc.d/hostguard onestop || true
+fi

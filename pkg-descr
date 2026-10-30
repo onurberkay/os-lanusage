@@ -1,11 +1,79 @@
-Records which LAN / customer hosts used which ports and services by
-reading the pf state table, shows the results as graphs and tables
-under Reporting: LAN Usage, and identifies the services LAN hosts
-serve by testing the ports (banner, HTTP, TLS, Redis, PostgreSQL,
-RDP, DNS, NTP, optionally nmap -sV).
+Watches and protects the hosts behind the firewall (e.g. customer
+servers): detects attacks on them (reflection, floods, brute force,
+scans; with Suricata and CrowdSec), puts the sources of chosen attack
+types into virusprot through block conditions, and shows pf state and
+rule limits, blocked traffic and which ports and services each host
+uses as graphs and tables under Reporting: HostGuard. Identifies the
+services hosts serve by testing the ports (banner, HTTP, TLS, Redis,
+PostgreSQL, RDP, DNS, NTP, optionally nmap -sV).
 
 Plugin Changelog
 ================
+
+1.7
+
+* Renamed from os-lanusage to os-hostguard; the package and install.sh stop
+  the old plugin and move its database, a model migration takes over its
+  settings; an os-lanusage package is removed under System: Firmware: Plugins
+  (install.sh does it)
+* Privileges split: Reporting (dashboard), Services: Settings (settings,
+  service, clearing data), Firewall: Block conditions
+* Attacks tab: attack episodes per LAN host (start, end, peak, sources, share
+  that passed the firewall), classified as reflection / amplification, SYN /
+  UDP / ICMP flood, distributed brute force or port scan; from the existing
+  samples, no extra capture
+* Suricata alerts towards LAN hosts (eve.json, read incrementally with a cap),
+  per host and signature; severity 1 alerts raise an alert
+* CrowdSec: the scenario of each banned outside source (cscli, every 5 minutes)
+* Block conditions: "block from now on" on an attack, a Suricata alert or an
+  outside source at a rule limit; matching outside sources go into virusprot
+  (never LAN hosts, the firewall or trusted networks), released when their
+  time is up or the condition is removed; own tab, removable any time; own
+  privilege "Firewall: HostGuard: Block conditions"; the table is synced again
+  every 10 minutes (reboot, flush), at most 50000 addresses. An attack
+  condition takes the sources of the attack only (not every visitor of the
+  host); with global source tracking a rule limit condition takes only
+  sources that have a state of that rule
+* Outside addresses are grouped on the Blocked and Limits tabs, every one of
+  them is listed on the Attacks tab
+* Owner (AS, country) and network type of every outside source: cloud, CDN,
+  VPN, hosting, online service, else the AS category (ISP, business,
+  education, government; marked as an estimate), and its role (Tor exit,
+  crawler, monitoring, iCloud Private Relay); a summary by addresses and by
+  packets and the busiest owners. Free lists that need no account, downloaded
+  once a day (a missed list once more three hours later) into a local
+  database, the more reliable one winning where they
+  disagree: official provider ranges and the Tor exit list, the official lists
+  rezmoss/cloud-provider-ip-addresses collects, AS derived lists (X4BNet
+  lists_vpn), ipverse/as-metadata categories, iptoasn.com, Spamhaus ASN-DROP
+* Automatic filtering in three levels by how sure the detection is: 1 port
+  scans / sweeps seen in blocked attempts and Spamhaus ASN-DROP networks,
+  2 brute force repeaters (not on mail / web login ports) and Suricata
+  severity 1, 3 flood repeaters pf also blocked, Suricata severity 2 and per
+  source limits; off by default; crawlers, monitoring, Private Relay, CDNs and
+  reflection sources are never taken
+* Blocked going out: an attempt that passed in (e.g. pass all on the LAN) but
+  has no state on the outgoing interface is reported as blocked there
+* Direction of every per source limit: "→ in (clients)" when outside addresses
+  open the connections, "← out (your hosts)" when your LAN hosts do; taken from
+  the rule (from / to, interface, direction) and shown on rules, sources and alerts
+* Global source tracking: a LAN host is no longer compared with the limits of
+  inbound rules and an outside client with those of outbound rules
+* States / Limits hosts table separates the three things: share of the pf state
+  table, the strictest per source rule limit of the host, and the HostGuard
+  warning threshold (an alert setting, not a pf limit)
+* Blocked traffic sampling captures packets where they enter (tcpdump -Q in):
+  outgoing packets on the upstream bridge member no longer look blocked
+* Blocked traffic: past the 50 busiest ports of a host and direction per poll the
+  rest is stored as "other ports" (a flood on random ports no longer adds a row
+  per port)
+* The first poll after a (re)start takes the existing connections as its
+  baseline instead of counting them as new with all their bytes
+* An emptied "Watch pf tables" field now watches no tables (it used to fall back
+  to virusprot, sshlockout, crowdsec)
+* max-src-conn-rate shown with its time window; estimated values marked "est.";
+  clicking a host keeps the current tab; "Acknowledge all open" asks first;
+  the direction filter on the Blocked tab no longer empties the "Why" columns
 
 1.6
 

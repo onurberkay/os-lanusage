@@ -1,0 +1,32 @@
+<acl>
+    <!-- the dashboard: read only (acknowledging alerts and testing a port of a LAN host included) -->
+    <page-reporting-hostguard>
+        <name>Reporting: HostGuard</name>
+        <patterns>
+            <pattern>ui/hostguard</pattern>
+            <pattern>ui/hostguard/</pattern>
+            <pattern>ui/hostguard/index*</pattern>
+            <pattern>api/hostguard/stats/*</pattern>
+            <!-- exact: the ACL matches the whole URL, query string included ("status*" would also match
+                 "status/../ack"); the pages call these by POST without a query string -->
+            <pattern>api/hostguard/service/status</pattern>
+        </patterns>
+    </page-reporting-hostguard>
+    <!-- networks, trusted networks, the service and clearing the data decide what block conditions protect -->
+    <page-services-hostguard-settings>
+        <name>Services: HostGuard: Settings</name>
+        <patterns>
+            <pattern>ui/hostguard/settings*</pattern>
+            <pattern>api/hostguard/settings/*</pattern>
+            <pattern>api/hostguard/service/*</pattern>
+            <pattern>api/hostguard/stats/status</pattern>
+        </patterns>
+    </page-services-hostguard-settings>
+    <!-- block conditions put addresses into the virusprot pf table: a firewall privilege of their own -->
+    <page-firewall-hostguard-conditions>
+        <name>Firewall: HostGuard: Block conditions</name>
+        <patterns>
+            <pattern>api/hostguard/conditions/*</pattern>
+        </patterns>
+    </page-firewall-hostguard-conditions>
+</acl>

@@ -1,0 +1,102 @@
+#!/bin/sh
+#
+# PROVIDE: hostguard
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+#
+# HostGuard collector (OPNsense plugin os-hostguard)
+
+. /etc/rc.subr
+
+name="hostguard"
+rcvar="hostguard_enable"
+
+load_rc_config "${name}"
+
+: ${hostguard_enable:="NO"}
+
+pidfile="/var/run/${name}.pid"
+childpid="/var/run/${name}.child.pid"
+script="/usr/local/opnsense/scripts/OPNsense/HostGuard/collector.py"
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+extra_commands="status"
+
+hostguard_running()
+{
+	# -L: only while daemon(8) holds its pidfile locked, a stale file may name another process by now
+	[ -f "${pidfile}" ] && pgrep -L -F "${pidfile}" > /dev/null 2>&1
+}
+
+hostguard_collector()
+{
+	# the collector itself, also one left without its supervisor (daemon(8) killed)
+	pgrep -f "${script}" > /dev/null 2>&1
+}
+
+hostguard_wait()
+{
+	# $1: the condition to wait for to become false, at most a minute
+	i=0
+	while [ "${i}" -lt 60 ] && "$1"; do
+		sleep 1
+		i=$((i + 1))
+	done
+}
+
+hostguard_start()
+{
+	if hostguard_running; then
+		echo "${name} is already running."
+		return 0
+	fi
+	# a collector without its supervisor would write the same database next to the new one
+	if hostguard_collector; then
+		hostguard_stop
+	fi
+	mkdir -p /var/db/hostguard
+	echo "Starting ${name}."
+	# daemon(8) supervises and restarts the collector if it ever dies; its output
+	# (e.g. a traceback before the collector opens syslog) goes to syslog
+	/usr/sbin/daemon -f -S -T "${name}" -r -R 10 -P "${pidfile}" -p "${childpid}" \
+		-t "${name}" /usr/local/bin/python3 "${script}"
+}
+
+hostguard_stop()
+{
+	if hostguard_running; then
+		echo "Stopping ${name}."
+		# daemon(8) passes TERM on and exits with the collector, which stops after
+		# its current poll (pfctl calls can take a while on a large state table)
+		pkill -TERM -L -F "${pidfile}"
+		hostguard_wait hostguard_running
+		if hostguard_running; then
+			pkill -KILL -L -F "${pidfile}"
+		fi
+	elif hostguard_collector; then
+		echo "Stopping ${name} (its supervisor is gone)."
+		pkill -TERM -f "${script}"
+		hostguard_wait hostguard_collector
+	else
+		echo "${name} is not running."
+	fi
+	# never leave the collector running without its supervisor
+	if hostguard_collector; then
+		pkill -KILL -f "${script}"
+	fi
+	rm -f "${pidfile}" "${childpid}"
+}
+
+hostguard_status()
+{
+	if hostguard_running; then
+		echo "${name} is running as pid $(cat "${pidfile}")."
+	else
+		echo "${name} is not running."
+		return 1
+	fi
+}
+
+run_rc_command "$1"
