@@ -6,7 +6,7 @@ türlerinin kaynaklarını engelleme koşullarıyla `virusprot` tablosuna ekler,
 engellenen trafiği ve her IP'nin hangi portu / servisi kullandığını **Reporting → HostGuard** menüsünde
 grafik ve tablolarla gösterir.
 
-Eski adı **os-lanusage**'dır (1.6'ya kadar). 1.7 kurulumu eskisini kaldırır, veritabanını ve ayarları taşır
+Eski adı **os-lanusage**'dır (1.6'ya kadar). 1.7 ve sonraki sürümlerin kurulumu eskisini kaldırır, veritabanını ve ayarları taşır
 (bkz. *Kurulum*).
 
 ## Ne yapar?
@@ -185,10 +185,37 @@ kategori alır. Hosting listeleri AS bazlıdır; karışık sağlayıcılarda ba
 
 ### Engelleme koşulları (Block conditions sekmesi)
 
-Bir saldırı olayında, Suricata alarmında, uyarılar listesinde ya da kural limitine takılan dış kaynakta **block**
-düğmesiyle koşul oluşturulur. Hedef "bu host" ya da "her host", süre saat olarak seçilir (0 = koşul silinene kadar).
+Koşullar sekmedeki **New condition** formuyla eklenir. Saldırı olayındaki, Suricata alarmındaki ya da kural limitine
+takılan dış kaynaktaki **block** düğmesi bu formu doldurur; ban türü formda seçilip **Add condition** ile eklenir.
 Bundan sonra her poll'da koşula uyan **dış** kaynaklar `virusprot` tablosuna eklenir; OPNsense bu tablodaki adresleri
 engeller.
+
+| Koşul (Match) | Neye uyar |
+|---|---|
+| Attack type | Attacks sekmesinin sınıflandırdığı saldırı türünün kaynakları (reflection, flood, brute force, port scan) |
+| Alert Suricata dropped (IPS) | Suricata'nın kendisinin **drop** ettiği alarmlar (IPS modu, politikanızın drop'a çevirdiği kurallar): bir sid ya da boş bırakılırsa hepsi. IDS modunda hiçbir şey drop edilmez, koşul eşleşmez |
+| Suricata signature (any action) | Bir sid'in bütün alarmları, yalnız loglananlar da |
+| Source at a rule limit | Seçilen kuralın (ya da limiti olan herhangi bir kuralın) seçilen limitine (max source states / max established connections / max new connections rate) takılan dış kaynaklar. Kural listesi son poll'daki etiketli, kaynak limitli kurallardır; kuralın önce limite dolması beklenmez |
+
+Hedef: belirli bir LAN hostu ya da boş = her host (kural limitinde hedef yoktur).
+
+**Ban türleri:**
+
+| Ban | Davranış |
+|---|---|
+| Fixed time | Her engelleme verilen saat kadar sürer (son eşleşmeden itibaren; eşleşme sürdükçe yenilenir) |
+| Escalating | İlk engelleme verilen saat, aynı adres aynı koşulla her tekrar engellendiğinde bir öncekinin 2 / 3 / 4 / 5 / 10 katı, *longest block*'a kadar (ör. 24 sa → 48 sa → 96 sa ... 720 sa). Son engellemesi bittikten sonra *start again after* gün (varsayılan 30) temiz kalan adres yeniden ilk adımdan başlar |
+| Until the condition is removed | Koşul silinene kadar |
+
+**Block after matches:** 1 = ilk eşleşmede engelle. Daha büyük bir sayı, adresin *within* dakika içinde o kadar ayrı
+poll'da eşleşmesini bekler (tek örnek yetmez; yanlış pozitifi azaltır). Eşleşme poll başına bir kez sayıldığından
+pencere en az N poll sürmelidir (30 sn poll ile 3 eşleşme için en az 1,5 dk); daha kısası kabul edilmez. Bekleyenler koşul tablosunda "+N waiting" olarak
+görünür.
+
+**Suricata severity neden kullanılmıyor:** severity imzanın sınıfının önceliğidir (classtype priority), eşleşmenin ne
+kadar kesin olduğu değil. Ör. `policy-violation` sınıfı (bir curl user-agent'ı gibi zararsız trafik) `trojan-activity`
+ile aynı şekilde severity 1'dir. "Drop" ise sizin IPS politikanızın bilinçli kararıdır; bu yüzden otomatik filtre ve
+önerilen koşul drop'u kullanır.
 
 - LAN hostları, firewall'un kendi adresleri ve *Trusted networks* hiçbir koşulda tabloya eklenmez. Bir LAN ağı
   arayüz yeniden yapılandırılırken bir an görünmese de, collector çalıştığı sürece gördüğü LAN ağları ve daha önce LAN
@@ -210,7 +237,10 @@ engeller.
   adres bırakmaz.
 - Yeniden başlatma ya da tablo boşaltılması durumuna karşı koşulların tuttuğu adresler 10 dakikada bir tabloya yeniden
   eklenir. Koşulların tuttuğu adres sayısı toplamda 50.000 ile sınırlıdır.
-- Aynı koşul tekrar oluşturulursa yeni koşul açılmaz, mevcut koşulun süresi değişir.
+- Aynı koşul tekrar oluşturulursa yeni koşul açılmaz, mevcut koşulun ban'ı değişir; tuttuğu adresler de yeni süreye
+  göre (son eşleşmeden itibaren) çıkar.
+- *Addresses blocked by conditions* tablosu her adresin bu engellemesinin ne kadar sürdüğünü ve artan banda kaçıncı
+  engellemesi olduğunu gösterir.
 - Yetkiler üçe ayrılır:
   - *Reporting: HostGuard*: dashboard, uyarıları onaylama, port testi. Koşulları görür ama ekleyemez.
   - *Services: HostGuard: Settings*: ayarlar, servis, veritabanını temizleme (ağlar ve trusted networks neyin
@@ -227,8 +257,8 @@ kapalı.
 | Seviye | Ne alınır | Neden bu seviyede |
 |---|---|---|
 | **1: certain** (yanlış pozitif pratikte yok) | Tek örnekte (birkaç saniye) TCP SYN'leriyle ya da istemci portundan (1024+) UDP ile bir hostun **20+ farklı portuna** ya da **10+ farklı LAN hostuna** engellenen deneme yapan kaynak; Spamhaus **ASN-DROP** ağlarından gelen engellenen trafik | Normal bir istemci kapalı portları taramaz; ASN-DROP ağları suç için işletilir. Kanıt örneklenmiş gerçek paketlerdir, tahmin değil. TCP'de yalnız SYN'ler sayılır; UDP'de sunucu portundan gelen cevaplar (yansıyan DNS/NTP cevapları), UDP traceroute / mtr / tracepath (hedef port 33000 ve üstü) ve ICMP (hostlar üzerinde gezen izleme ping'leri) tarama sayılmaz. Tek istisna kasıtlı kötüye kullanım: SYN ve UDP paketlerinin kaynak adresi sahte olabilir, biri başka bir adres adına tarama yaparak o adresi engelletebilir (bkz. aşağıda *Trusted networks*) |
-| **2: likely** | Dağıtık brute force'ta giriş portuna tekrar tekrar bağlanan kaynaklar (tek bağlantı yapan ziyaretçi alınmaz; posta ve web giriş portları hariç: 25, 110, 143, 465, 587, 993, 995, 8006, 8443); Suricata **severity 1** alarmı | Saldırı sırasında kendi SSH oturumunuz ya da hatalı bir imza aralarında olabilir. Posta ve web istemcileri aynı anda birkaç bağlantı açtığı için yoğun bir posta/web sunucusu brute force gibi görünür; onları sunucunun kendi logları (ör. hosttaki CrowdSec) daha iyi ayırır |
-| **3: possible** | Flood'larda tekrar eden ve pf'in engellediği trafiği de olan kaynaklar (trafiğin ≥%1'i; yalnız geçen trafik yoğun bir web günü olabilir); Suricata **severity 2**; kural başına kaynak limitini aşanlar | Paylaşılan adresler (CGNAT, şirket NAT'ı), sahte kaynaklı flood'lar ve geniş imzalar hata olasılığını artırır |
+| **2: likely** | Dağıtık brute force'ta giriş portuna tekrar tekrar bağlanan kaynaklar (tek bağlantı yapan ziyaretçi alınmaz; posta ve web giriş portları hariç: 25, 110, 143, 465, 587, 993, 995, 8006, 8443); Suricata'nın **drop ettiği** alarmlar (IPS modu; IDS modunda eşleşmez) | Saldırı sırasında kendi SSH oturumunuz ya da hatalı bir imza aralarında olabilir. Posta ve web istemcileri aynı anda birkaç bağlantı açtığı için yoğun bir posta/web sunucusu brute force gibi görünür; onları sunucunun kendi logları (ör. hosttaki CrowdSec) daha iyi ayırır |
+| **3: possible** | Flood'larda tekrar eden ve pf'in engellediği trafiği de olan kaynaklar (trafiğin ≥%1'i; yalnız geçen trafik yoğun bir web günü olabilir); kural başına kaynak limitini aşanlar | Paylaşılan adresler (CGNAT, şirket NAT'ı), sahte kaynaklı flood'lar ve geniş imzalar hata olasılığını artırır |
 
 - **Hiçbir seviyede alınmaz:** LAN hostları, firewall'un adresleri, *Trusted networks* (her koşulda olduğu gibi);
   arama motoru / yapay zekâ botları, izleme servisleri, iCloud Private Relay ve CDN adresleri (ağ türü verisi açık
@@ -244,6 +274,9 @@ kapalı.
   değiştirilir. Seviye düşürülünce ya da kapatılınca yalnız kaldırılan kuralların tuttuğu adresler tablodan çıkar.
 - Bir adres son eşleşmesinden *block for* saat (varsayılan 24) sonra çıkar; eşleşmeye devam ederse süre yenilenir.
   Süre değiştirilince zaten engellenmiş adresler de yeni süreye göre (son eşleşmeden itibaren) çıkar.
+- *Ban type* = *Escalating* seçilirse aynı kuralla tekrar engellenen adres her seferinde iki katı süre kalır
+  (24 → 48 → 96 sa ...), *longest block* saate (varsayılan 720 = 30 gün) kadar; son engellemesi bittikten 30 gün
+  sonra baştan başlar.
 - Adresleri süresi dolunca tablodan collector çıkarır. HostGuard'ı tamamen kapatırsanız (*Enable* kaldırılır) koşulların
   o an tuttuğu adresler `virusprot`'ta kalır (yeniden açılınca süresi dolanlar çıkarılır). Kapatmadan önce
   *Automatic filtering*'i *off* yapıp koşulları silin ve bir poll bekleyin, ya da sonra **Firewall → Diagnostics →
@@ -354,7 +387,9 @@ altına koyup `make package` ile `os-hostguard` paketi üretilebilir (Makefile h
 | Owner and network type of sources | açık | Günde bir kez (bir liste inmezse üç saat sonra bir kez daha) ücretsiz listeleri indirir (~15 MB indirme, ~35 MB disk); kapatılırsa indirme yapılmaz. |
 | Also hosting | boş | Hosting sayılacak AS'ler, ör. `AS16276,AS24940` (AS kategorisinden önce, adres listelerinden sonra). |
 | Automatic filtering | kapalı | Seviye 1 / 1+2 / 1+2+3 (yukarıdaki tablo). |
-| Automatic filtering: block for | 24 saat | Son eşleşmeden sonra tabloda kalma süresi. |
+| Automatic filtering: block for | 24 saat | Son eşleşmeden sonra tabloda kalma süresi (artan banda ilk engelleme). |
+| Automatic filtering: ban type | Fixed | *Escalating*: aynı kuralla her tekrar engellemede süre iki katı. |
+| Automatic filtering: longest block | 720 saat | Artan banın ulaşabileceği en uzun süre. |
 
 Servis testleri yalnızca izlenen LAN ağlarındaki adreslere yapılır; dış IP'ler hiçbir zaman taranmaz.
 
@@ -378,6 +413,7 @@ Web GUI (Volt + JS SVG grafikler) ──> /api/hostguard/stats/*, /api/hostguard
 | `.../lib/pfstats.py` | `pfctl -vsi / -sm / -vvsr / -sT` okuma: sayaçlar, limitler, kural limitleri, tablolar |
 | `.../lib/ipdata.py`, `.../update_ipdata.py` | Ağ türü / sahip listelerini indirme (günde bir, collector'ın alt süreci) ve yerel sorgu |
 | `.../lib/autofilter.py` | Otomatik filtreleme seviyeleri, kuralları ve esirgenen trafik |
+| `.../lib/bans.py` | Koşulların ban türleri: sabit, artan süre, eşleşme eşiği |
 | `.../query.py`, `.../probe.py` | configd tarafından çağrılan JSON okuma / elle test |
 | `src/opnsense/mvc/...` | Model, ayar formu, menü, ACL, API ve görünümler |
 | `src/opnsense/www/js/hostguard.charts.js` | Bağımlılıksız SVG grafik kütüphanesi |

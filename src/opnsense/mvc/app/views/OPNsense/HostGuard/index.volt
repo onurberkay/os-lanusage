@@ -34,6 +34,10 @@
     .hg-table-tools .hg-search { width: 260px; height: 30px; }
     .hg-table-tools select { height: 30px; width: auto; }
     .hg-table-tools .hg-count { opacity: .65; font-size: 12px; margin-left: auto; }
+    .hg-cond-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
+    .hg-cond-form label { font-size: 12px; font-weight: normal; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+    .hg-cond-form .form-control { height: 30px; width: auto; max-width: 100%; }
+    .hg-cond-form #hg-cf-rule { max-width: 420px; }
     .hg-table-wrap { max-height: 640px; overflow: auto; }
     table.hg-table th { cursor: pointer; white-space: nowrap; user-select: none; }
     table.hg-table th.nosort { cursor: default; }
@@ -674,20 +678,25 @@ $(function () {
             {key: 'signature', label: 'Signature', text: function (r) { return r.signature + ' ' + r.category + ' ' + r.sid; },
              html: function (r) { return '<b>' + esc(r.signature) + '</b><div class="text-muted" style="font-size:11px">' + esc(r.category) + ' · sid ' + esc(r.sid) + '</div>'; }},
             {key: 'port', label: 'Port', cls: 'num', num: true},
-            {key: 'action', label: 'Action'},
+            {key: 'action', label: 'Action', html: function (r) {
+                return r.action === 'blocked' ? '<span class="hg-badge lan" title="Suricata dropped it (IPS mode, a rule set to drop)">dropped</span>' : esc(r.action); }},
             {key: 'hits', label: 'Hits', cls: 'num', num: true, html: function (r) { return fmtNum(r.hits); }},
             {key: 'sources', label: 'Sources', cls: 'num', num: true,
              html: function (r) { return '<span title="' + esc(r.top.join(', ')) + '">' + fmtNum(r.sources) + '</span>'; }},
             {key: 'last_seen', label: 'Last seen', num: true, cls: 'nowrap', html: function (r) { return ago(r.last_seen); }},
-            {key: '', label: 'Block from now on', nosort: true, cls: 'nowrap', html: function (r) { return blockButtons('ids', String(r.sid), r.target); }}
+            // a signature Suricata drops: prepared as a "dropped" condition (the form can switch it to every alert)
+            {key: '', label: 'Block from now on', nosort: true, cls: 'nowrap', html: function (r) {
+                return blockButtons(r.action === 'blocked' ? 'ids_drop' : 'ids', String(r.sid), r.target); }}
         ], 'hits', function (r) { return r.severity === 1 ? 'hg-row-bad' : ''; },
            'No Suricata alert towards your hosts in this period (or Suricata / its EVE log is off)'),
 
         conditions: makeTable('hg-conditions', [
             {key: 'id', label: '#', cls: 'num', num: true},
             {key: 'ctype', label: 'Condition', text: condText, html: function (r) { return '<b>' + esc(condText(r)) + '</b>'; }},
-            {key: 'duration', label: 'Block for', num: true, html: function (r) { return esc(fmtDuration(r.duration)); }},
-            {key: 'blocked_now', label: 'Blocked now', cls: 'num', num: true},
+            {key: 'duration', label: 'Ban', num: true, text: function (r) { return r.ban_text || fmtDuration(r.duration); },
+             html: function (r) { return (r.ban === 'escalating' ? '<span class="hg-badge lan">escalating</span> ' : '') + esc(r.ban_text || fmtDuration(r.duration)); }},
+            {key: 'blocked_now', label: 'Blocked now', cls: 'num', num: true,
+             html: function (r) { return fmtNum(r.blocked_now) + (r.waiting ? ' <span class="text-muted" title="Addresses that matched, waiting for more matches before they are blocked">+' + fmtNum(r.waiting) + ' waiting</span>' : ''); }},
             {key: 'hits', label: 'Sources blocked (total)', cls: 'num', num: true},
             {key: 'last_hit', label: 'Last match', num: true, cls: 'nowrap', html: function (r) { return r.last_hit ? ago(r.last_hit) : '<span class="text-muted">never</span>'; }},
             {key: 'created', label: 'Created', num: true, cls: 'nowrap', html: function (r) { return esc(fmtDate(r.created)); }},
@@ -695,7 +704,7 @@ $(function () {
                 if (r.ctype === 'auto') return '<span class="text-muted" title="Services: HostGuard: Settings, Automatic filtering">level in the settings</span>';
                 return '<button type="button" class="btn btn-default btn-xs hg-cond-del" data-id="' + esc(r.id) +
                        '" title="Remove the condition and release the addresses only it holds"><i class="fa fa-trash"></i> remove</button>'; }}
-        ], 'id', null, 'No block condition. Create one with "block" on the Attacks tab.'),
+        ], 'id', null, 'No block condition. Add one with the form above.'),
 
         autoblocked: makeTable('hg-autoblocked', [
             {key: 'ip', label: 'Address', sortValue: function (r) { return ipKey(r.ip); }},
@@ -708,7 +717,13 @@ $(function () {
              html: function (r) {
                  // a time already past: the collector takes it out of the table (retried until pfctl succeeds)
                  if (r.expires && r.expires <= Date.now() / 1000) return '<span class="text-muted">being released</span>';
-                 return r.expires ? esc(fmtDate(r.expires)) + ' <span class="text-muted">(later while it keeps matching)</span>' : '<span class="text-muted">with the condition</span>'; }}
+                 return r.expires ? esc(fmtDate(r.expires)) + ' <span class="text-muted">(later while it keeps matching)</span>' : '<span class="text-muted">with the condition</span>'; }},
+            {key: 'span', label: 'This block', num: true, cls: 'nowrap',
+             sortValue: function (r) { return r.span === null || r.span === undefined ? -1 : (r.span || Infinity); },
+             html: function (r) {
+                 // escalating bans: the how-manieth block of this address by the condition
+                 return (r.span === null || r.span === undefined ? '<span class="text-muted">condition time</span>' : esc(fmtDuration(r.span))) +
+                        (r.offense > 1 ? ' <span class="hg-badge lan" title="Blocked by this condition before: each repeat lasts longer">' + esc(r.offense) + '. time</span>' : ''); }}
         ], 'added', null, 'No address blocked by a condition'),
 
         counters: makeTable('hg-counters', [
@@ -952,9 +967,11 @@ $(function () {
     function condText(c) {
         // automatic filtering: the collector keeps these from the setting, the note says level and rule
         if (c.ctype === 'auto') return 'Automatic, ' + (c.note || c.value);
+        const value = String(c.value), cut = value.lastIndexOf(':');
         const what = c.ctype === 'attack' ? (ATTACK_KINDS[c.value] || c.value) :
                      c.ctype === 'ids' ? 'Suricata sid ' + c.value :
-                     'source at ' + String(c.value).split(':').pop() + ' (rule ' + String(c.value).split(':')[0] + ')';
+                     c.ctype === 'ids_drop' ? (value === '*' ? 'any alert Suricata dropped' : 'Suricata dropped sid ' + value) :
+                     'source at ' + value.slice(cut + 1) + ' (' + (value.slice(0, cut) === '*' ? 'any rule' : 'rule ' + value.slice(0, cut)) + ')';
         return what + ' → ' + (c.target === '*' ? 'any LAN host' : c.target);
     }
     function fmtDuration(s) {
@@ -1022,6 +1039,7 @@ $(function () {
                 tables.conditions.setRows(d.conditions);
                 tables.autoblocked.setRows(d.blocked);
                 $('#hg-cond-total').text(fmtNum(d.total) + ' addresses in <' + d.table + '> by conditions');
+                condForm.options(d);
             });
         }
     };
@@ -1030,6 +1048,7 @@ $(function () {
         const ongoing = d.episodes.filter(function (e) { return e.active; });
         const reaching = ongoing.filter(function (e) { return e.passed_pct >= 50; }).length;
         const ids = d.ids_status || {}, cs = d.crowdsec_status || {}, ab = d.autoblock || {};
+        const dropped = d.ids.filter(function (r) { return r.action === 'blocked'; }).length;
         const kpis = [
             ['Ongoing attacks', fmtNum(ongoing.length), reaching + ' reaching the host', ongoing.length > 0],
             ['Episodes in period', fmtNum(d.episodes.length), Object.keys(d.kinds).map(function (k) {
@@ -1039,7 +1058,9 @@ $(function () {
               d.folded ? fmtNum(d.folded) + ' only counted (not stored one by one)' : ''].filter(Boolean).join(' · ') ||
              'blocked or at a rule limit'],
             ['Suricata', ids.enabled ? (ids.readable ? fmtNum(d.ids.length) + ' alert rows' : 'no EVE log') : 'off',
-             ids.enabled ? (ids.readable ? 'host / signature, towards your hosts' : String(ids.path || '')) : 'enable it in the settings', ids.enabled && !ids.readable],
+             ids.enabled ? (ids.readable ? (d.ids.length ? fmtNum(dropped) + ' of them dropped by Suricata' +
+                                                           (dropped ? '' : ' (IDS mode, or no rule set to drop)') : 'host / signature, towards your hosts')
+                                         : String(ids.path || '')) : 'enable it in the settings', ids.enabled && !ids.readable],
             ['CrowdSec', cs.enabled ? (cs.decisions === null || cs.decisions === undefined ? 'n/a' : fmtNum(cs.decisions)) : 'off', 'local decisions'],
             ['Blocked by conditions', fmtNum(ab.blocked || 0), (ab.conditions || 0) + ' conditions' +
              ' · automatic filtering ' + (ab.auto_level ? 'level ' + ab.auto_level : 'off') +
@@ -1135,16 +1156,128 @@ $(function () {
         });
     });
 
-    $(document).on('click', '.hg-block', function () {
-        const $b = $(this);
-        const hours = window.prompt('Block condition: ' + condText({ctype: $b.data('type'), value: String($b.data('value')),
-            target: String($b.data('target'))}) + '\n\nFrom now on every OUTSIDE source matching this goes into <virusprot> ' +
-            '(LAN hosts and trusted networks never).\nKeep each address blocked for how many hours? (0 = until the condition is removed)', '24');
-        if (hours === null) return;
-        const h = /^\s*\d+\s*$/.test(hours) ? parseInt(hours, 10) : NaN;
-        if (isNaN(h) || h > 8784) { showError('Enter whole hours between 0 and 8784.'); return; }
-        ajaxCall(COND_API + 'add', {type: $b.data('type'), value: String($b.data('value')), target: String($b.data('target')),
-                                    duration: String(h * 3600)}, function (res) {
+    // the new condition form of the Block conditions tab; "block" elsewhere fills it in, the ban is chosen there
+    const condForm = {
+        rules: [],
+        init: function () {
+            $('#hg-cf-attack').html(Object.keys(ATTACK_KINDS).map(function (k) {
+                return '<option value="' + esc(k) + '">' + esc(ATTACK_KINDS[k]) + '</option>'; }).join(''));
+            $('#hg-cf-factor').html([2, 3, 4, 5, 10].map(function (f) { return '<option value="' + f + '">' + f + '</option>'; }).join(''));
+            this.options({});
+        },
+        options: function (d) {
+            // the rules with a per source limit and a label, from the last poll; the choice survives a reload
+            // (also one "block" chose that is not in the list)
+            const $rule = $('#hg-cf-rule'), keep = $rule.val(), self = this;
+            const old = this.rules.filter(function (r) { return r.label === keep; })[0];
+            this.rules = (d.src_rules || []).slice();
+            if (keep && keep !== '*' && old && !this.rules.some(function (r) { return r.label === keep; })) this.rules.push(old);
+            $rule.html('<option value="*">any rule with a per source limit</option>' + this.rules.map(function (r) {
+                return '<option value="' + esc(r.label) + '">@' + esc(r.nr) + ' ' + esc(r.descr || r.label) + '</option>'; }).join(''));
+            if (keep && self.rules.some(function (r) { return r.label === keep; })) $rule.val(keep);
+            this.kinds();
+            this.show();
+        },
+        kinds: function () {
+            // only the limits the chosen rule has (any rule: all three)
+            const label = $('#hg-cf-rule').val(), $kind = $('#hg-cf-kind'), keep = $kind.val();
+            const rule = this.rules.filter(function (r) { return r.label === label; })[0];
+            const kinds = rule ? rule.kinds : ['max-src-states', 'max-src-conn', 'max-src-conn-rate'];
+            const names = {'max-src-states': 'max source states', 'max-src-conn': 'max established connections',
+                           'max-src-conn-rate': 'max new connections (rate)'};
+            $kind.html(kinds.map(function (k) {
+                return '<option value="' + esc(k) + '">' + esc(names[k] || k) + (rule && rule.limits[k] ? ' (' + esc(rule.limits[k]) + ')' : '') + '</option>'; }).join(''));
+            if (keep && kinds.indexOf(keep) >= 0) $kind.val(keep);
+        },
+        show: function () {
+            const type = $('#hg-cf-type').val(), ban = $('#hg-cf-ban').val();
+            $('.hg-cf-for').each(function () { $(this).toggle(String($(this).data('for')).split(' ').indexOf(type) >= 0); });
+            $('.hg-cf-ban').each(function () { $(this).toggle(String($(this).data('for')).split(' ').indexOf(ban) >= 0); });
+            $('.hg-cf-hours-label').text(ban === 'escalating' ? 'First block (hours)' : 'Block for (hours)');
+            $('#hg-cf-sid').attr('placeholder', type === 'ids_drop' ? 'every dropped alert' : 'e.g. 2001219');
+            $('.hg-cf-window').toggle((parseInt($('#hg-cf-strikes').val(), 10) || 1) > 1);
+            const hints = {
+                attack: 'Sources of this attack type, as the Attacks tab classifies them.',
+                ids_drop: 'Alerts Suricata dropped itself: IPS mode, a rule your policy sets to drop. In IDS mode nothing is dropped and this never matches.',
+                ids: 'Every alert of this signature, also the ones Suricata only logged. The severity says nothing about how sure a match is.',
+                _strikes: ' Matches are counted once per poll: N matches need a window of at least N polls.',
+                src_limit: 'Outside sources at the limit of this rule (read from the rule every poll). Only rules with a description (label) are listed: a condition follows the label across rule reloads.'
+            };
+            $('#hg-cf-hint').text((hints[type] || '') + ((parseInt($('#hg-cf-strikes').val(), 10) || 1) > 1 ? hints._strikes : ''));
+        },
+        fill: function (type, value, target) {
+            // from a "block" button: the matching fields, the rest stays as chosen last
+            $('#hg-cf-type').val(type);
+            if (type === 'attack') $('#hg-cf-attack').val(value);
+            if (type === 'ids' || type === 'ids_drop') $('#hg-cf-sid').val(value === '*' ? '' : value);
+            if (type === 'src_limit') {
+                const cut = value.lastIndexOf(':'), label = value.slice(0, cut);
+                const $rule = $('#hg-cf-rule');
+                if (!$rule.find('option').filter(function () { return this.value === label; }).length) {
+                    // a rule not in the last poll's list (no longer at the top 100): offered as it is
+                    $rule.append('<option value="' + esc(label) + '">' + esc(label) + '</option>');
+                    this.rules.push({label: label, nr: '?', kinds: [value.slice(cut + 1)], limits: {}});
+                }
+                $rule.val(label);
+                const kind = value.slice(cut + 1), rule = this.rules.filter(function (r) { return r.label === label; })[0];
+                // a limit the rule had when the source hit it, but not in the last poll's ruleset any more
+                if (rule.kinds.indexOf(kind) < 0) rule.kinds.push(kind);
+                this.kinds();
+                $('#hg-cf-kind').val(kind);
+            }
+            $('#hg-cf-target').val(target && target !== '*' ? target : '');
+            this.show();
+        },
+        spec: function () {
+            // -> the POST fields, or an error text
+            const type = $('#hg-cf-type').val(), ban = $('#hg-cf-ban').val();
+            const whole = function (id, min, max, what) {
+                const s = String($(id).val()).trim();
+                const n = /^\d+$/.test(s) ? parseInt(s, 10) : NaN;
+                if (isNaN(n) || n < min || n > max) throw what + ': a whole number between ' + min + ' and ' + max;
+                return n;
+            };
+            let value = '';
+            if (type === 'attack') value = $('#hg-cf-attack').val();
+            if (type === 'ids' || type === 'ids_drop') {
+                const sid = String($('#hg-cf-sid').val()).trim();
+                if (!sid && type === 'ids_drop') value = '*';
+                else if (/^\d{1,12}$/.test(sid)) value = sid;
+                else throw 'Signature id: the sid number' + (type === 'ids_drop' ? ', or empty for every dropped alert' : '');
+            }
+            if (type === 'src_limit') value = $('#hg-cf-rule').val() + ':' + $('#hg-cf-kind').val();
+            const target = type === 'src_limit' ? '*' : String($('#hg-cf-target').val()).trim() || '*';
+            if (target !== '*' && !isIp(target)) throw 'Towards LAN host: one IP address, or empty for any';
+            const hours = ban === 'permanent' ? 0 : whole('#hg-cf-hours', 1, 8784, 'Hours');
+            const strikes = whole('#hg-cf-strikes', 1, 100, 'Block after matches');
+            const fields = {type: type, value: value, target: target, duration: String(hours * 3600),
+                            ban: ban === 'escalating' ? 'escalating' : 'fixed', strikes: String(strikes),
+                            window: String(strikes > 1 ? whole('#hg-cf-window', 1, 10080, 'Within minutes') * 60 : 0)};
+            if (ban === 'escalating') {
+                const longest = whole('#hg-cf-max', 1, 8784, 'Longest block');
+                if (longest < hours) throw 'The longest block must be at least the first one';
+                Object.assign(fields, {factor: String($('#hg-cf-factor').val()), max_duration: String(longest * 3600),
+                                       forget: String(whole('#hg-cf-forget', 1, 366, 'Start again after days') * 86400)});
+            }
+            return fields;
+        }
+    };
+    condForm.init();
+    $('#hg-cf-type, #hg-cf-ban').on('change', function () { condForm.show(); });
+    $('#hg-cf-strikes').on('input', function () { condForm.show(); });
+    $('#hg-cf-rule').on('change', function () { condForm.kinds(); });
+    $('#hg-cf-add').on('click', function () {
+        let fields;
+        try {
+            fields = condForm.spec();
+        } catch (e) {
+            notice(String(e), true);
+            return;
+        }
+        const text = condText({ctype: fields.type, value: fields.value, target: fields.target});
+        if (!window.confirm('Block condition: ' + text + '\n\nFrom now on every OUTSIDE source matching this goes into <virusprot> ' +
+                            '(LAN hosts and trusted networks never).')) return;
+        ajaxCall(COND_API + 'add', fields, function (res) {
             if (!res || res.status !== 'ok') {
                 // stays visible (the next reload hides #hg-error): e.g. no "Block conditions" privilege
                 notice(res && res.status === 403
@@ -1152,10 +1285,16 @@ $(function () {
                     : (res && res.message) || 'Adding the condition failed.', true);
                 return;
             }
-            // the same condition again only changes how long its addresses stay blocked
-            if (res.updated) notice('This condition already existed: its block time is now ' + fmtDuration(h * 3600) + '.');
-            showTab('conditions');
+            // the same condition again only changes its ban, also for the addresses it holds
+            if (res.updated) notice('This condition already existed: its ban is changed, also for the addresses it holds now.');
+            loaders.conditions();
         });
+    });
+    $(document).on('click', '.hg-block', function () {
+        const $b = $(this);
+        condForm.fill(String($b.data('type')), String($b.data('value')), String($b.data('target')));
+        showTab('conditions');
+        notice('Choose the ban and press "Add condition".');
     });
     $(document).on('click', '.hg-cond-del', function () {
         const id = $(this).data('id');
@@ -1634,7 +1773,51 @@ $(function () {
 
     <div id="hg-tab-conditions" class="tab-pane fade">
         <div class="hg-note" style="padding:14px 14px 0">
-            {{ lang._('Block conditions: created with "block" on an attack, a Suricata alert or an outside source at a rule limit. Every poll, outside sources matching a condition are added to the virusprot table (blocked by the OPNsense rule for it). LAN hosts, the firewall and trusted networks are never added. A source at a rule limit is matched against the limit the rule has now: change max-src-states and the condition follows. Removing a condition releases the addresses only it holds; each address is also released when its time is up. OPNsense may expire virusprot entries on its own schedule too.') }}
+            {{ lang._('Block conditions: created with the form below, or prepared by "block" on an attack, a Suricata alert or an outside source at a rule limit. A ban is a fixed time, escalating (each new block of the same address by the same condition lasts longer, up to the longest block) or until the condition is removed; "block after matches" waits until an address matched in that many polls within the time given. Every poll, outside sources matching a condition are added to the virusprot table (blocked by the OPNsense rule for it). LAN hosts, the firewall and trusted networks are never added. A source at a rule limit is matched against the limit the rule has now: change max-src-states and the condition follows. Removing a condition releases the addresses only it holds; each address is also released when its time is up. OPNsense may expire virusprot entries on its own schedule too.') }}
+        </div>
+        <div class="hg-pane" id="hg-cond-new">
+            <h4 style="font-size:13px;font-weight:600">{{ lang._('New condition') }}</h4>
+            <div class="hg-cond-form">
+                <label>{{ lang._('Match') }}
+                    <select class="form-control" id="hg-cf-type">
+                        <option value="attack">{{ lang._('Attack type') }}</option>
+                        <option value="ids_drop">{{ lang._('Alert Suricata dropped (IPS)') }}</option>
+                        <option value="ids">{{ lang._('Suricata signature (any action)') }}</option>
+                        <option value="src_limit">{{ lang._('Source at a rule limit') }}</option>
+                    </select></label>
+                <label class="hg-cf-for" data-for="attack">{{ lang._('Attack') }}
+                    <select class="form-control" id="hg-cf-attack"></select></label>
+                <label class="hg-cf-for" data-for="ids ids_drop">{{ lang._('Signature id (sid)') }}
+                    <input type="text" class="form-control" id="hg-cf-sid" placeholder="{{ lang._('every dropped alert') }}" style="width:150px"/></label>
+                <label class="hg-cf-for" data-for="src_limit">{{ lang._('Rule') }}
+                    <select class="form-control" id="hg-cf-rule"></select></label>
+                <label class="hg-cf-for" data-for="src_limit">{{ lang._('Limit') }}
+                    <select class="form-control" id="hg-cf-kind"></select></label>
+                <label class="hg-cf-for" data-for="attack ids ids_drop">{{ lang._('Towards LAN host') }}
+                    <input type="text" class="form-control" id="hg-cf-target" placeholder="{{ lang._('any (empty)') }}" style="width:170px"/></label>
+            </div>
+            <div class="hg-cond-form">
+                <label>{{ lang._('Ban') }}
+                    <select class="form-control" id="hg-cf-ban">
+                        <option value="fixed">{{ lang._('Fixed time') }}</option>
+                        <option value="escalating">{{ lang._('Escalating (longer each repeat)') }}</option>
+                        <option value="permanent">{{ lang._('Until the condition is removed') }}</option>
+                    </select></label>
+                <label class="hg-cf-ban" data-for="fixed escalating"><span class="hg-cf-hours-label">{{ lang._('Block for (hours)') }}</span>
+                    <input type="text" class="form-control" id="hg-cf-hours" value="24" style="width:90px"/></label>
+                <label class="hg-cf-ban" data-for="escalating">{{ lang._('Each repeat x') }}
+                    <select class="form-control" id="hg-cf-factor"></select></label>
+                <label class="hg-cf-ban" data-for="escalating">{{ lang._('Longest block (hours)') }}
+                    <input type="text" class="form-control" id="hg-cf-max" value="720" style="width:90px"/></label>
+                <label class="hg-cf-ban" data-for="escalating">{{ lang._('Start again after (days quiet)') }}
+                    <input type="text" class="form-control" id="hg-cf-forget" value="30" style="width:80px"/></label>
+                <label>{{ lang._('Block after matches') }}
+                    <input type="text" class="form-control" id="hg-cf-strikes" value="1" style="width:70px"/></label>
+                <label class="hg-cf-window">{{ lang._('within (minutes)') }}
+                    <input type="text" class="form-control" id="hg-cf-window" value="10" style="width:80px"/></label>
+                <button type="button" class="btn btn-primary" id="hg-cf-add"><i class="fa fa-ban"></i> {{ lang._('Add condition') }}</button>
+            </div>
+            <div class="hg-note" id="hg-cf-hint"></div>
         </div>
         <div class="hg-pane" id="hg-conditions">
             <h4 style="font-size:13px;font-weight:600">{{ lang._('Conditions') }} <span class="text-muted" id="hg-cond-total" style="font-weight:normal"></span></h4>

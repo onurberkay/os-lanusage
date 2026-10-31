@@ -35,12 +35,27 @@ class ConditionsController extends ApiControllerBase
         $value = str_replace(' ', '_', (string)$this->request->getPost('value'));
         $target = (string)$this->request->getPost('target');
         $duration = (string)$this->request->getPost('duration');
-        if (!in_array($type, ['attack', 'ids', 'src_limit']) || !preg_match('/^[A-Za-z0-9_:.*-]{1,100}$/D', $value) ||
+        // the ban (lib/bans.py checks the ranges): fixed, or escalating by a factor up to the longest block;
+        // optionally only after a number of matches within a time window
+        $ban = (string)($this->request->getPost('ban') ?? 'fixed');
+        $numbers = [];
+        foreach (['factor' => '2', 'max_duration' => '0', 'strikes' => '1', 'window' => '0',
+                  'forget' => '2592000'] as $name => $default) {
+            $numbers[] = (string)($this->request->getPost($name) ?? $default);
+        }
+        if (!in_array($type, ['attack', 'ids', 'ids_drop', 'src_limit']) ||
+            !preg_match('/^[A-Za-z0-9_:.*-]{1,100}$/D', $value) ||
             ($target !== '*' && ($type === 'src_limit' || filter_var($target, FILTER_VALIDATE_IP) === false)) ||
-            !ctype_digit($duration)) {
+            !ctype_digit($duration) || !in_array($ban, ['fixed', 'escalating'])) {
             return ['status' => 'error', 'message' => gettext('Invalid condition.')];
         }
-        return $this->run(['cond_add', 0, '-', implode('|', [$type, $value, $target, $duration])]);
+        foreach ($numbers as $number) {
+            if (!ctype_digit($number) || strlen($number) > 12) {
+                return ['status' => 'error', 'message' => gettext('Invalid condition.')];
+            }
+        }
+        return $this->run(['cond_add', 0, '-', implode('|', array_merge([$type, $value, $target, $duration, $ban],
+                                                                         $numbers))]);
     }
 
     /**

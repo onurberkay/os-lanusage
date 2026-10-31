@@ -20,7 +20,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 
-from lib import common, detect, ipdata, pfstats
+from lib import bans, common, detect, ipdata, pfstats
 
 ROW_LIMIT = 5000
 FOLD_KEEP = 20      # the collector stores the 20 busiest remotes per host / port each poll, folds the rest
@@ -818,15 +818,48 @@ def source_networks(rows, cfg):
 
 
 def cmd_conditions(con, _hours, _ip, _extra):
-    columns = ('id', 'ctype', 'value', 'target', 'duration', 'note', 'created', 'hits', 'last_hit')
+    columns = ('id', 'ctype', 'value', 'target', 'duration', 'note', 'created', 'hits', 'last_hit') + bans.FIELDS
     active = dict(con.execute('SELECT cond, COUNT(*) FROM autoblocked GROUP BY cond').fetchall())
-    conditions = [dict(zip(columns, r), blocked_now=active.get(r[0], 0)) for r in con.execute(
-        'SELECT %s FROM conditions ORDER BY id' % ', '.join(columns))]
-    blocked = [dict(zip(('ip', 'cond', 'tbl', 'added', 'expires', 'reason', 'owned'), r)) for r in con.execute(
-        'SELECT ip, cond, tbl, added, expires, reason, owned FROM autoblocked ORDER BY added DESC LIMIT ?',
-        [ROW_LIMIT])]
+    # addresses that can still reach the number of matches: inside the window of a condition that asks for it
+    waiting = dict(con.execute(
+        'SELECT s.cond, COUNT(*) FROM strikes s JOIN conditions c ON c.id = s.cond'
+        ' WHERE c.strikes > 1 AND s.first_seen >= ? - c.strike_window GROUP BY s.cond', (int(time.time()),)).fetchall())
+    conditions = []
+    for r in con.execute('SELECT %s FROM conditions ORDER BY id' % ', '.join(columns)):
+        cond = dict(zip(columns, r), blocked_now=active.get(r[0], 0), waiting=waiting.get(r[0], 0))
+        cond['ban_text'] = bans.describe(cond)
+        conditions.append(cond)
+    blocked = [dict(zip(('ip', 'cond', 'tbl', 'added', 'expires', 'reason', 'owned', 'span', 'offense'), r))
+               for r in con.execute(
+        # the repeat count only means something for an escalating ban (one changed to fixed keeps old rows)
+        'SELECT a.ip, a.cond, a.tbl, a.added, a.expires, a.reason, a.owned, a.span,'
+        " CASE WHEN c.ban = 'escalating' THEN o.count END FROM autoblocked a"
+        ' LEFT JOIN conditions c ON c.id = a.cond'
+        ' LEFT JOIN offenses o ON o.ip = a.ip AND o.cond = a.cond ORDER BY a.added DESC LIMIT ?', [ROW_LIMIT])]
     return {'conditions': conditions, 'blocked': blocked, 'table': common.AUTOBLOCK_TABLE,
-            'total': con.execute('SELECT COUNT(DISTINCT ip) FROM autoblocked').fetchone()[0]}
+            'total': con.execute('SELECT COUNT(DISTINCT ip) FROM autoblocked').fetchone()[0],
+            'src_rules': src_rules(common.read_status()), 'attack_kinds': list(common.ATTACK_KINDS),
+            'factors': list(bans.FACTORS)}
+
+
+def src_rules(status):
+    """
+    The rules a "source at a rule limit" condition can name: those with a per source limit and a label
+    (a condition follows the label, rule numbers change with every reload), from the collector's last poll
+    """
+    rules = {}
+    for rule in status.get('rules', []):
+        kinds = [k for k in common.SRC_LIMIT_KINDS if k in (rule.get('options') or {})]
+        if not kinds or not rule.get('label'):
+            continue
+        item = rules.setdefault(rule['label'], {'label': rule['label'], 'nr': rule['nr'], 'kinds': [],
+                                                'descr': rule.get('descr') or rule.get('text', '')[:80],
+                                                'limits': {}})
+        for kind in kinds:
+            if kind not in item['kinds']:
+                item['kinds'].append(kind)
+                item['limits'][kind] = rule['options'][kind]
+    return sorted(rules.values(), key=lambda r: r['nr'])
 
 
 CONDITION_VALUE_RE = re.compile(r'[A-Za-z0-9_:.*-]{1,100}')
@@ -834,19 +867,40 @@ DIGITS_RE = re.compile(r'[0-9]{1,12}')
 
 
 def cmd_cond_add(con, _hours, _ip, spec):
-    """ spec: <type>|<value>|<target LAN host or *>|<seconds, 0 = until removed>; '_' stands for a space """
+    """
+    spec: <type>|<value>|<target LAN host or *>|<seconds, 0 = until removed>, then optionally the ban
+    (lib/bans.py): |<fixed or escalating>|<factor>|<longest block, seconds>|<matches>|<within seconds>|<reset
+    after seconds>; '_' stands for a space
+    """
     parts = spec.split('|')
-    if len(parts) != 4 or parts[0] not in common.CONDITION_TYPES or not CONDITION_VALUE_RE.fullmatch(parts[1]):
+    if len(parts) == 4:
+        parts += ['fixed', '2', '0', '1', '0', str(bans.DEFAULT_FORGET)]
+    if len(parts) != 10 or parts[0] not in common.CONDITION_TYPES or not CONDITION_VALUE_RE.fullmatch(parts[1]):
         return {'status': 'error', 'message': 'invalid condition'}
-    ctype, value, target, duration = parts
+    ctype, value, target, duration, ban = parts[:5]
+    numbers = parts[5:]
+    if not DIGITS_RE.fullmatch(duration) or not all(DIGITS_RE.fullmatch(n) for n in numbers):
+        return {'status': 'error', 'message': 'invalid duration'}
+    duration = int(duration)
+    factor, longest, strikes, window, forget = [int(n) for n in numbers]
+    error = bans.check(ban, factor, longest, strikes, window, forget, duration,
+                       common.load_config()['poll_interval'])
+    if error:
+        return {'status': 'error', 'message': error}
+    settings = {'duration': duration, 'ban': ban, 'factor': factor, 'max_duration': longest, 'strikes': strikes,
+                'strike_window': window if strikes > 1 else 0, 'forget': forget}
+    if ban == 'fixed':
+        # what a fixed ban does not use, as the collector writes it for the automatic rules
+        settings.update(factor=2, max_duration=0)
     if ctype == 'attack':
         value = value.replace('_', ' ')
     # a value its type never produces would be listed as a condition that never matches
     rule, _, kind = value.rpartition(':')
     if not (value in common.ATTACK_KINDS if ctype == 'attack' else DIGITS_RE.fullmatch(value) if ctype == 'ids'
+            else value == '*' or DIGITS_RE.fullmatch(value) if ctype == 'ids_drop'
             else rule and kind in common.SRC_LIMIT_KINDS):
         return {'status': 'error', 'message': 'invalid condition'}
-    if ctype == 'ids':
+    if ctype in ('ids', 'ids_drop') and value != '*':
         value = str(int(value))     # the collector compares str(sid): "0042" would never match
     if target != '*':
         if ctype == 'src_limit':
@@ -857,24 +911,20 @@ def cmd_cond_add(con, _hours, _ip, spec):
             target = (getattr(addr, 'ipv4_mapped', None) or addr).compressed
         except ValueError:
             return {'status': 'error', 'message': 'invalid target'}
-    if not DIGITS_RE.fullmatch(duration) or int(duration) > 366 * 86400:
-        return {'status': 'error', 'message': 'invalid duration'}
-    duration = int(duration)
+    now = int(time.time())
     with con:
         row = con.execute('SELECT id FROM conditions WHERE ctype = ? AND value = ? AND target = ?',
                           (ctype, value, target)).fetchone()
         if row is None:
-            con.execute('INSERT INTO conditions (ctype, value, target, duration, created) VALUES (?, ?, ?, ?, ?)',
-                        (ctype, value, target, duration, int(time.time())))
+            con.execute('INSERT INTO conditions (ctype, value, target, created, %s) VALUES (?, ?, ?, ?, %s)'
+                        % (', '.join(settings), ', '.join('?' * len(settings))),
+                        (ctype, value, target, now) + tuple(settings.values()))
             return {'status': 'ok', 'created': True, 'updated': False}
-        # the same condition again: only how long its addresses stay blocked changes, also for those it holds
-        # (counted from their last match, as the collector does)
-        con.execute('UPDATE conditions SET duration = ? WHERE id = ?', (duration, row[0]))
-        # (not those already due to leave: the collector released them, e.g. an address no longer blockable)
-        con.execute('UPDATE autoblocked SET expires = CASE WHEN ? = 0 THEN 0'
-                    ' ELSE COALESCE(NULLIF(last_match, 0), added) + ? END'
-                    ' WHERE cond = ? AND NOT (expires > 0 AND expires <= ?)',
-                    (duration, duration, row[0], int(time.time())))
+        # the same condition again: only how long its addresses stay blocked changes (its ban), also for those
+        # it holds (counted from their last match, as the collector does)
+        con.execute('UPDATE conditions SET %s WHERE id = ?' % ', '.join('%s = ?' % k for k in settings),
+                    tuple(settings.values()) + (row[0],))
+        bans.respan(con, dict(settings, id=row[0]), now)
     return {'status': 'ok', 'created': False, 'updated': True, 'id': row[0]}
 
 
@@ -902,6 +952,8 @@ def cmd_cond_del(con, _hours, _ip, cid):
                                                   % common.AUTOBLOCK_TABLE}
         con.execute('DELETE FROM autoblocked WHERE cond = ?', (cid,))
         con.execute('DELETE FROM conditions WHERE id = ?', (cid,))
+        con.execute('DELETE FROM offenses WHERE cond = ?', (cid,))
+        con.execute('DELETE FROM strikes WHERE cond = ?', (cid,))
         con.execute('COMMIT')
     except Exception:
         con.execute('ROLLBACK')

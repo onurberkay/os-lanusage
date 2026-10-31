@@ -10,6 +10,28 @@ PostgreSQL, RDP, DNS, NTP, optionally nmap -sV).
 Plugin Changelog
 ================
 
+1.8
+
+* Suricata: automatic filtering takes the alerts Suricata dropped itself (IPS
+  mode, the rules your policy sets to drop) at level 2, instead of severity 1
+  (level 2) and severity 2 (level 3); the severity is the priority of the
+  signature's class, not how sure the match is. New block condition "alert
+  Suricata dropped", for one sid or every dropped alert. The Suricata summary
+  says how many alert rows were dropped (none: IDS mode or no drop rule)
+* New condition form on the Block conditions tab: attack type, Suricata sid,
+  dropped alerts, or a source at the limit of one chosen rule (or any rule)
+  and one chosen limit (max source states / connections / new connection
+  rate), without waiting for the rule to show up at its limit first; "block"
+  on the other tabs fills the form in
+* Ban types for block conditions: fixed time, until the condition is removed,
+  or escalating (each new block of the same address by the same condition
+  2/3/4/5/10 times longer, up to a longest block, starting again after a
+  number of quiet days); "block after N matches within M minutes" for any
+  condition. Automatic filtering can use an escalating ban too (x2 up to a
+  longest block, settings)
+* Addresses blocked by conditions show how long this block lasts and the
+  how-manieth block it is
+
 1.7
 
 * Renamed from os-lanusage to os-hostguard; the package and install.sh stop

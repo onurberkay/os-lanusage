@@ -15,6 +15,8 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 
+from . import bans
+
 CONF_FILE = '/usr/local/etc/hostguard/hostguard.conf'
 DB_DIR = '/var/db/hostguard'
 DB_FILE = os.path.join(DB_DIR, 'hostguard.db')
@@ -68,6 +70,9 @@ DEFAULTS = {
     # automatic filtering (lib/autofilter.py): 0 off, 1 certain, 2 + likely, 3 + possible
     'auto_block_level': 0,
     'auto_block_hours': 24,
+    # fixed, or escalating: x2 each repeat up to auto_block_max_hours (lib/bans.py)
+    'auto_block_ban': 'fixed',
+    'auto_block_max_hours': 720,
 }
 STATUS_FILE = os.path.join(DB_DIR, 'status.json')
 
@@ -184,12 +189,21 @@ CREATE TABLE IF NOT EXISTS autoblocked (
     owned INTEGER DEFAULT 1, last_match INTEGER DEFAULT 0,
     PRIMARY KEY (ip, cond)
 );
+CREATE TABLE IF NOT EXISTS offenses (
+    ip TEXT, cond INTEGER, count INTEGER DEFAULT 0, until INTEGER,
+    PRIMARY KEY (ip, cond)
+);
+CREATE TABLE IF NOT EXISTS strikes (
+    ip TEXT, cond INTEGER, count INTEGER DEFAULT 0, first_seen INTEGER, last_seen INTEGER,
+    PRIMARY KEY (ip, cond)
+);
 """
 
 # block conditions: what a condition matches on, and the table outside sources go into
-CONDITION_TYPES = ('attack', 'ids', 'src_limit')     # what the operator can add; "auto" comes from the settings
-# what each type matches on: an attack kind (attacks.TargetStats.classify), a Suricata sid,
-# "<rule label or *>:<per source limit>"
+# what the operator can add; "auto" comes from the settings
+CONDITION_TYPES = ('attack', 'ids', 'ids_drop', 'src_limit')
+# what each type matches on: an attack kind (attacks.TargetStats.classify), a Suricata sid, a Suricata sid
+# or * for the alerts Suricata dropped (IPS mode), "<rule label or *>:<per source limit>"
 ATTACK_KINDS = ('reflection', 'port scan', 'brute force', 'syn flood', 'udp flood', 'icmp flood', 'mixed flood')
 SRC_LIMIT_KINDS = ('max-src-states', 'max-src-conn', 'max-src-conn-rate')
 AUTOBLOCK_TABLE = 'virusprot'
@@ -199,8 +213,11 @@ MIGRATIONS = {
     'hosts': (('states', 'INTEGER DEFAULT 0'), ('state_detail', "TEXT DEFAULT ''"), ('new_rate', 'REAL DEFAULT 0')),
     'blocked': (('reason', "TEXT DEFAULT ''"), ('iface', "TEXT DEFAULT ''")),
     'srclimits': (('label', "TEXT DEFAULT ''"),),
-    # 0: the address was already in the table (pf overload, another tool): never taken out by a condition
-    'autoblocked': (('owned', 'INTEGER DEFAULT 1'), ('last_match', 'INTEGER DEFAULT 0')),
+    # 0: the address was already in the table (pf overload, another tool): never taken out by a condition;
+    # span: how long this block lasts after each match (NULL: the condition's duration, rows before 1.8)
+    'autoblocked': (('owned', 'INTEGER DEFAULT 1'), ('last_match', 'INTEGER DEFAULT 0'), ('span', 'INTEGER')),
+    # the ban type of a condition (lib/bans.py)
+    'conditions': bans.COLUMNS,
 }
 
 
@@ -449,7 +466,12 @@ def connect(path=DB_FILE):
         existing = {row[1] for row in con.execute('PRAGMA table_info(%s)' % table)}
         for name, definition in columns:
             if name not in existing:
-                con.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, name, definition))
+                try:
+                    con.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, name, definition))
+                except sqlite3.OperationalError as exc:
+                    # the collector and a GUI query starting together after an upgrade: the other one added it
+                    if 'duplicate column' not in str(exc):
+                        raise
     return con
 
 

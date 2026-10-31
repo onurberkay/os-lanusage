@@ -1,7 +1,7 @@
 <model>
     <mount>//OPNsense/hostguard/general</mount>
     <description>HostGuard</description>
-    <version>1.7.0</version>
+    <version>1.8.0</version>
     <items>
         <enabled type="BooleanField">
             <Default>0</Default>
@@ -233,8 +233,8 @@
             <OptionValues>
                 <off value="0">Off</off>
                 <l1 value="1">Level 1: certain (scans, Spamhaus ASN-DROP)</l1>
-                <l2 value="2">Level 1 + 2: likely (brute force, Suricata severity 1)</l2>
-                <l3 value="3">Level 1 + 2 + 3: possible (flood sources, Suricata severity 2, rule limits)</l3>
+                <l2 value="2">Level 1 + 2: likely (brute force, alerts Suricata dropped)</l2>
+                <l3 value="3">Level 1 + 2 + 3: possible (flood sources, rule limits)</l3>
             </OptionValues>
         </auto_block_level>
         <auto_block_hours type="IntegerField">
@@ -244,5 +244,20 @@
             <Required>Y</Required>
             <ValidationMessage>Choose between 1 and 8784 hours.</ValidationMessage>
         </auto_block_hours>
+        <auto_block_ban type="OptionField">
+            <Default>fixed</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <fixed value="fixed">Fixed: every block lasts the time above</fixed>
+                <escalating value="escalating">Escalating: twice as long each time the address comes back</escalating>
+            </OptionValues>
+        </auto_block_ban>
+        <auto_block_max_hours type="IntegerField">
+            <Default>720</Default>
+            <MinimumValue>1</MinimumValue>
+            <MaximumValue>8784</MaximumValue>
+            <Required>Y</Required>
+            <ValidationMessage>Choose between 1 and 8784 hours.</ValidationMessage>
+        </auto_block_max_hours>
     </items>
 </model>

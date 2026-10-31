@@ -272,12 +272,24 @@
         <id>general.auto_block_level</id>
         <label>Automatic filtering</label>
         <type>dropdown</type>
-        <help>Put outside sources into virusprot automatically, graded by how sure the detection is. Level 1 (certain, practically no false positives): a source whose blocked TCP SYNs or UDP packets from a client port (not traceroute / mtr) reach 20 ports of one host or 10 LAN hosts within one sample (a few seconds), blocked traffic from a Spamhaus ASN-DROP network. Level 2 (likely): repeated logins in a distributed brute force (not on mail and web login ports, whose clients open several connections at once), Suricata severity 1 alerts. Level 3 (possible, mistakes likelier with shared addresses / CGNAT): repeat sources of floods that pf also blocked, Suricata severity 2, sources over a per source rule limit. Never: LAN hosts, the firewall, trusted networks, search engine / AI crawlers, monitoring probes, iCloud Private Relay, CDNs (these need "Owner and network type of sources"), and reflection sources (abused DNS / NTP servers). The source of SYN / UDP packets can be forged, so someone could get an address blocked on purpose: add your own monitoring and management addresses and outside addresses that must never be blocked (customer offices, payment / webhook senders) to the trusted networks. The rules show up on the Block conditions tab. Disabling HostGuard itself leaves what is blocked at that moment in virusprot: set this to off first.</help>
+        <help>Put outside sources into virusprot automatically, graded by how sure the detection is. Level 1 (certain, practically no false positives): a source whose blocked TCP SYNs or UDP packets from a client port (not traceroute / mtr) reach 20 ports of one host or 10 LAN hosts within one sample (a few seconds), blocked traffic from a Spamhaus ASN-DROP network. Level 2 (likely): repeated logins in a distributed brute force (not on mail and web login ports, whose clients open several connections at once), alerts Suricata dropped itself (IPS mode, the rules your policy sets to drop; in IDS mode nothing is dropped and this matches nothing). The Suricata severity is not used: it is the priority of the signature's class (a policy-violation alert such as a curl user agent is severity 1), not how sure the match is. Level 3 (possible, mistakes likelier with shared addresses / CGNAT): repeat sources of floods that pf also blocked, sources over a per source rule limit. Never: LAN hosts, the firewall, trusted networks, search engine / AI crawlers, monitoring probes, iCloud Private Relay, CDNs (these need "Owner and network type of sources"), and reflection sources (abused DNS / NTP servers). The source of SYN / UDP packets can be forged, so someone could get an address blocked on purpose: add your own monitoring and management addresses and outside addresses that must never be blocked (customer offices, payment / webhook senders) to the trusted networks. The rules show up on the Block conditions tab. Disabling HostGuard itself leaves what is blocked at that moment in virusprot: set this to off first.</help>
     </field>
     <field>
         <id>general.auto_block_hours</id>
         <label>Automatic filtering: block for (hours)</label>
         <type>text</type>
-        <help>How long an automatically blocked address stays in virusprot after its last match. A changed value also applies to the addresses blocked already.</help>
+        <help>How long an automatically blocked address stays in virusprot after its last match (with an escalating ban: the first time). A changed value also applies to the addresses blocked already.</help>
+    </field>
+    <field>
+        <id>general.auto_block_ban</id>
+        <label>Automatic filtering: ban type</label>
+        <type>dropdown</type>
+        <help>Fixed: every block lasts the time above. Escalating: an address blocked again by the same rule stays twice as long as the time before (24 h, 48 h, 96 h ...) up to the longest block below; once its last block ended 30 days ago it starts at the first step again. Block conditions you add yourself choose their own ban type on the Block conditions tab.</help>
+    </field>
+    <field>
+        <id>general.auto_block_max_hours</id>
+        <label>Automatic filtering: longest block (hours)</label>
+        <type>text</type>
+        <help>With an escalating ban, the longest a block grows to (720 hours = 30 days). Never shorter than the first block.</help>
     </field>
 </form>

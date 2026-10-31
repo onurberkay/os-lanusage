@@ -31,7 +31,7 @@ import time
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-from lib import attacks, autofilter, common, detect, filterlog, ipdata, l2, pfstate, pfstats, sampler, shaper
+from lib import attacks, autofilter, bans, common, detect, filterlog, ipdata, l2, pfstate, pfstats, sampler, shaper
 
 PORT_PROTOS = ('tcp', 'udp', 'sctp')
 TCP_ANSWERED = {'ESTABLISHED', 'FIN_WAIT_1', 'FIN_WAIT_2', 'CLOSE_WAIT', 'CLOSING', 'LAST_ACK'}
@@ -158,7 +158,8 @@ class Collector:
         # automatic filtering (lib/autofilter.py): what the last sample shows per outside source
         self.probes = {}                    # source -> {(LAN host, proto, port)} its blocked attempts reached
         self.blocked_sources = set()        # outside sources with blocked attempts towards LAN hosts
-        self.ids_severity = defaultdict(dict)   # severity -> {source: 'sid N on host'}
+        self.ids_drops = defaultdict(set)   # (LAN host, sid) -> sources of the alerts Suricata dropped
+        self.ids_dropped_last = 0
         self.networks = autofilter.Networks()
         self.auto_exempted = Counter()      # wanted traffic an automatic rule matched but spared, this poll
         self.logged_lateral = Counter()     # LAN to LAN attempts the firewall log showed this poll
@@ -571,14 +572,15 @@ class Collector:
         day, hour = now - now % 86400, now - now % 3600
         rows, worst = {}, {}
         self.ids_sources = defaultdict(set)
-        self.ids_severity = defaultdict(dict)
+        # what Suricata dropped itself (IPS mode, a rule set to drop by the operator's policy): the severity
+        # is the signature's class priority (policy-violation is 1 too), no measure of how sure the match is
+        self.ids_drops = defaultdict(set)
         for a in self.eve.read():
             if a['dst'] not in self.lan or a['src'] in self.lan or a['dst'] in self.own:
                 continue
             self.ids_sources[(a['dst'], a['sid'])].add(a['src'])
-            if a['severity'] in (1, 2):
-                self.ids_severity[a['severity']][a['src']] = 'Suricata severity %d, sid %s on %s' % (
-                    a['severity'], a['sid'], a['dst'])
+            if a['action'] == 'blocked':
+                self.ids_drops[(a['dst'], a['sid'])].add(a['src'])
             key = (day, a['dst'], a['src'], a['sid'])
             item = rows.get(key)
             if item is None:
@@ -590,6 +592,7 @@ class Collector:
                 w[1].add(a['src'])
                 w[2] += 1
         self.ids_last = sum(i[5] for i in rows.values())
+        self.ids_dropped_last = sum(len(s) for s in self.ids_drops.values())
         self.con.executemany(
             """INSERT INTO ids_alerts (day, target, src, sid, signature, category, severity, action, port,
                                        first_seen, last_seen, hits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -663,6 +666,11 @@ class Collector:
                 if str(sid) == value and target in ('*', dst):
                     for src in sources:
                         found[src] = 'Suricata sid %s on %s' % (sid, dst)
+        elif ctype == 'ids_drop':
+            for (dst, sid), sources in self.ids_drops.items():
+                if value in ('*', str(sid)) and target in ('*', dst):
+                    for src in sources:
+                        found[src] = 'Suricata dropped sid %s on %s' % (sid, dst)
         elif ctype == 'src_limit':
             # "<rule label>:<limit kind>": the limit value itself is read from the rule every poll,
             # so a changed max-src-states applies at once; the label survives renumbering
@@ -712,8 +720,8 @@ class Collector:
                     # a flood that only passed may be a busy day of a web site: only sources pf also blocked
                     if rule == 'brute_force' or src in self.blocked_sources:
                         found[src] = '%s on %s' % (a['kind'], a['target'])
-        elif rule in ('ids_high', 'ids_medium'):
-            found = dict(self.ids_severity.get(1 if rule == 'ids_high' else 2, {}))
+        elif rule == 'ids_drop':
+            found = self.condition_matches({'ctype': 'ids_drop', 'value': '*', 'target': '*'})
         elif rule == 'src_limit':
             for ip, label, nr, hit_kind in self.src_rule_hits:
                 found[ip] = '%s on rule @%d' % (hit_kind, nr)
@@ -741,24 +749,28 @@ class Collector:
         """
         self.networks.refresh(self.cfg['ipdata_enabled'] and self.cfg['auto_block_level'] > 0)
         wanted = autofilter.rules(self.cfg, self.networks.has_drop)
-        duration = self.cfg['auto_block_hours'] * 3600
-        existing = dict((r[1], (r[0], r[2], r[3])) for r in self.con.execute(
-            "SELECT id, value, duration, note FROM conditions WHERE ctype = 'auto'"))
-        for rule, (cid, old_duration, note) in existing.items():
+        ban = autofilter.ban(self.cfg)
+        existing = dict((r[1], (r[0], r[2], dict(zip(('duration',) + bans.FIELDS, r[3:])))) for r in self.con.execute(
+            "SELECT id, value, note, duration, %s FROM conditions WHERE ctype = 'auto'" % ', '.join(bans.FIELDS)))
+        for rule, (cid, note, old) in existing.items():
             if rule not in wanted:
                 self.con.execute('DELETE FROM conditions WHERE id = ?', (cid,))
-            elif old_duration != duration or note != self.auto_note(rule, wanted[rule]):
-                self.con.execute('UPDATE conditions SET duration = ?, note = ? WHERE id = ?',
-                                 (duration, self.auto_note(rule, wanted[rule]), cid))
-                if old_duration != duration:
-                    # what the rule holds now follows the new time, counted from the last match (as query.py
-                    # does for a condition created again); not the rows already due to leave
-                    self.con.execute('UPDATE autoblocked SET expires = COALESCE(NULLIF(last_match, 0), added) + ?'
-                                     ' WHERE cond = ? AND NOT (expires > 0 AND expires <= ?)', (duration, cid, now))
+                self.con.execute('DELETE FROM offenses WHERE cond = ?', (cid,))
+                self.con.execute('DELETE FROM strikes WHERE cond = ?', (cid,))
+                continue
+            if note != self.auto_note(rule, wanted[rule]):
+                self.con.execute('UPDATE conditions SET note = ? WHERE id = ?', (self.auto_note(rule, wanted[rule]), cid))
+            if old != ban:
+                self.con.execute('UPDATE conditions SET %s WHERE id = ?' % ', '.join('%s = ?' % k for k in ban),
+                                 tuple(ban.values()) + (cid,))
+                # what the rule holds now follows the new time, counted from the last match (as query.py
+                # does for a condition created again); not the rows already due to leave
+                bans.respan(self.con, dict(ban, id=cid), now)
         for rule, spec in wanted.items():
             if rule not in existing:
-                self.con.execute("INSERT INTO conditions (ctype, value, target, duration, note, created)"
-                                 " VALUES ('auto', ?, '*', ?, ?, ?)", (rule, duration, self.auto_note(rule, spec), now))
+                self.con.execute("INSERT INTO conditions (ctype, value, target, note, created, %s)"
+                                 " VALUES ('auto', ?, '*', ?, ?, %s)" % (', '.join(ban), ', '.join('?' * len(ban))),
+                                 (rule, self.auto_note(rule, spec), now) + tuple(ban.values()))
 
     @staticmethod
     def auto_note(rule, spec):
@@ -767,13 +779,15 @@ class Collector:
 
     def autoblock_state(self):
         """ the conditions, what they hold and what they match this poll (reads only) """
-        conditions = [dict(zip(('id', 'ctype', 'value', 'target', 'duration'), r)) for r in self.con.execute(
-            'SELECT id, ctype, value, target, duration FROM conditions')]
+        conditions = [dict(zip(('id', 'ctype', 'value', 'target', 'duration') + bans.FIELDS, r)) for r in self.con.execute(
+            'SELECT id, ctype, value, target, duration, %s FROM conditions' % ', '.join(bans.FIELDS))]
         held = {}           # (ip, condition) -> expires
         owned = {}          # ip -> 1 when a condition put it into the table, 0 when it was there already
-        for ip, cond, expires, own in self.con.execute('SELECT ip, cond, expires, owned FROM autoblocked'):
+        self.held_spans = {}    # (ip, condition) -> how long the block lasts after a match (None: the duration)
+        for ip, cond, expires, own, span in self.con.execute('SELECT ip, cond, expires, owned, span FROM autoblocked'):
             held[(ip, cond)] = expires
             owned[ip] = owned.get(ip, 0) or own
+            self.held_spans[(ip, cond)] = span
         hosts = set(r[0] for r in self.con.execute('SELECT ip FROM hosts'))
         # held addresses are checked again every poll: one whose network has become a LAN or trusted network
         # since, or that showed up as a LAN host or the firewall's, is released like an expired one; so is
@@ -822,7 +836,9 @@ class Collector:
         present = False
         # the listing only answers "already there?" for the addresses new at the time it was taken: one that
         # was held then and released meanwhile (query.py cond_del) waits for the next poll
-        asked = set(ip for _, matches in matched for ip in matches if ip not in owned)
+        # (not an address that only collects one more of the matches its condition waits for)
+        asked = set(ip for cond, matches in matched for ip in matches
+                    if ip not in owned and bans.would_block(self.con, now, ip, cond))
         if asked or (sync and not all(owned.values())):
             present = pfstats.table_show(table)
         # ... then everything is read again under the write lock: a condition query.py removed or changed
@@ -837,18 +853,28 @@ class Collector:
         hour = now - now % 3600
         touched = []
         for cond, matches in matched:
-            expires = now + cond['duration'] if cond['duration'] else 0
+            escalating = cond['ban'] == 'escalating' and cond['duration']
             fresh = []
             for ip, why in matches.items():
                 key = (ip, cond['id'])
                 if key in held:
-                    # still matching: stays blocked for the full time from now on
+                    # still matching: stays blocked for the full time of this block from now on
+                    span = self.held_spans.get(key)
+                    span = cond['duration'] if span is None else span
+                    expires = now + span if span else 0
                     if expires and held[key] and held[key] < expires:
                         self.con.execute('UPDATE autoblocked SET expires = ?, last_match = ? WHERE ip = ? AND cond = ?',
                                          (expires, now, ip, cond['id']))
                         held[key] = expires
+                        if escalating:
+                            # the reset time counts from the end of the block
+                            self.con.execute('UPDATE offenses SET until = ? WHERE ip = ? AND cond = ?',
+                                             (expires, ip, cond['id']))
                     else:
                         touched.append((now, ip, cond['id']))
+                    continue
+                # a condition asking for several matches: this poll is one of them (counted under the write lock)
+                if cond['strikes'] > 1 and not bans.strike(self.con, now, ip, cond):
                     continue
                 if ip not in owned:
                     if budget <= 0 or len(owned) >= self.AUTOBLOCK_MAX:
@@ -866,9 +892,18 @@ class Collector:
                     budget -= 1
                     if owned[ip]:
                         added.append(ip)
-                self.con.execute('INSERT INTO autoblocked (ip, cond, tbl, added, expires, reason, owned, last_match)'
-                                 ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                                 (ip, cond['id'], table, now, expires, why, owned[ip], now))
+                # an escalating ban: the how-manieth block of this address by this condition sets its length
+                offense = bans.offense(self.con, now, ip, cond) if escalating else 1
+                span = bans.seconds(cond, offense)
+                expires = now + span if span else 0
+                if escalating:
+                    bans.record(self.con, ip, cond, offense, expires)
+                    if offense > 1:
+                        why = '%s (block %d, %s)' % (why, offense, bans.span_text(span))
+                self.con.execute('INSERT INTO autoblocked (ip, cond, tbl, added, expires, reason, owned, last_match, span)'
+                                 ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                 (ip, cond['id'], table, now, expires, why, owned[ip], now, span))
+                self.con.execute('DELETE FROM strikes WHERE ip = ? AND cond = ?', (ip, cond['id']))
                 held[(ip, cond['id'])] = expires
                 fresh.append(ip)
             if not fresh:
@@ -877,9 +912,9 @@ class Collector:
                              (len(fresh), now, cond['id']))
             self.alert(now, 'autoblock', 'info', 'autoblock:%d:%d' % (cond['id'], hour), reopen=False,
                        count=len(fresh), peer=str(cond['id']),
-                       detail='Condition #%d (%s %s, target %s) put %d outside sources into <%s>: %s'
-                              % (cond['id'], cond['ctype'], cond['value'], cond['target'], len(fresh), table,
-                                 ', '.join(fresh[:5]) + (' ...' if len(fresh) > 5 else '')))
+                       detail='Condition #%d (%s %s, target %s, block %s) put %d outside sources into <%s>: %s'
+                              % (cond['id'], cond['ctype'], cond['value'], cond['target'], bans.describe(cond),
+                                 len(fresh), table, ', '.join(fresh[:5]) + (' ...' if len(fresh) > 5 else '')))
         # last match of the addresses that still match (a later change of the duration counts from it)
         self.con.executemany('UPDATE autoblocked SET last_match = ? WHERE ip = ? AND cond = ?', touched)
         if sync and isinstance(present, set):
@@ -1701,7 +1736,8 @@ class Collector:
             'rule_activity': self.rule_activity, 'src_limited': self.src_limited, 'shaper': self.shaper,
             'host_src': self.host_src, 'attacks_now': self.attacks_now[:50],
             'ids': {'enabled': self.eve is not None, 'path': self.cfg['ids_eve'],
-                    'readable': os.access(self.cfg['ids_eve'], os.R_OK), 'alerts_last_poll': self.ids_last},
+                    'readable': os.access(self.cfg['ids_eve'], os.R_OK), 'alerts_last_poll': self.ids_last,
+                    'dropped_last_poll': self.ids_dropped_last},
             'crowdsec': {'enabled': bool(self.cfg['crowdsec_enabled']), 'decisions': self.crowdsec_count},
             'autoblock': self.autoblock_status,
         })
@@ -1941,6 +1977,8 @@ class Collector:
                 self.con.execute('DELETE FROM %s WHERE %s < ?' % (table, column), (cutoff,))
             # decisions that ran out a day ago; conditions and what they blocked stay until removed / expired
             self.con.execute('DELETE FROM crowdsec WHERE until < ?', (now - 86400,))
+            # repeat counts of escalating bans and matches waiting for a threshold, once forgotten
+            bans.prune(self.con, now)
         # the last MAC per IP only for the bindings still kept
         bound = set(r[0] for r in self.con.execute('SELECT DISTINCT ip FROM l2bind'))
         self.ip_mac = dict((ip, mac) for ip, mac in self.ip_mac.items() if ip in bound)
